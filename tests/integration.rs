@@ -625,18 +625,16 @@ async fn reconnect() {
     )
     .await;
 
-    // Force-disconnect on both sides
+    // Disconnect locally on A. B is NOT notified — disconnect() does not send
+    // RESET. B still has an Established session for A that will be replaced
+    // by crash recovery on the next send().
     a.disconnect(addr_b);
-    let _ = wait_for(
-        &mut events_b,
-        |e| matches!(e, Event::Disconnected(_)),
-        Duration::from_secs(5),
-    )
-    .await;
 
     sleep(Duration::from_millis(100)).await;
 
-    // Reconnect
+    // Reconnect: send() auto-initiates a new handshake.
+    // B receives SYN for an address it already has a session for → crash
+    // recovery (PeerRestarted + Connected), then Data over the new session.
     a.send(addr_b, b"second").await.expect("reconnect send");
     let data = wait_for(
         &mut events_b,
