@@ -4,6 +4,8 @@ use std::time::Duration;
 use kcp_peer::{Event, KcpConfig, KcpPeer};
 use tokio::time::sleep;
 
+
+
 /// Helper: bind two KcpPeers on loopback, ephemeral ports.
 async fn bind_pair() -> (KcpPeer, KcpPeer, SocketAddr, SocketAddr) {
     let config = KcpConfig::builder()
@@ -208,25 +210,24 @@ async fn crash_initiator() {
         .await
         .expect("send after crash");
 
-    // 5. B detects the old session is dead (PeerReset) and new session arrives (Connected)
-    let ev = wait_for(
+    // 5. B still has A's old session (only 100ms elapsed, timeout is 60s).
+    //    A2's SYN from the same address with a different incarnation triggers
+    //    crash recovery: PeerReset for the old session, then Connected for the new one.
+    let peer_reset = wait_for(
         &mut events_b,
-        |e| matches!(e, Event::PeerReset(_) | Event::Connected(_)),
+        |e| matches!(e, Event::PeerReset(_)),
         Duration::from_secs(5),
     )
     .await;
-    match ev {
-        Event::PeerReset(_) => {
-            let _ = wait_for(
-                &mut events_b,
-                |e| matches!(e, Event::Connected(_)),
-                Duration::from_secs(5),
-            )
-            .await;
-        }
-        Event::Connected(_) => {}
-        _ => unreachable!(),
-    }
+    assert!(matches!(peer_reset, Event::PeerReset(addr) if addr == addr_a));
+
+    let connected = wait_for(
+        &mut events_b,
+        |e| matches!(e, Event::Connected(_)),
+        Duration::from_secs(5),
+    )
+    .await;
+    assert!(matches!(connected, Event::Connected(addr) if addr == addr_a));
 
     // 6. Data arrives at B
     let data_ev = wait_for(
@@ -312,6 +313,138 @@ async fn crash_receiver() {
     match data_ev {
         Event::Data(_addr, msg) => {
             assert_eq!(&msg[..], b"after_crash", "B2 received fresh data");
+        }
+        _ => unreachable!(),
+    }
+
+    drop(a);
+    drop(b2);
+}
+
+// ─── PeerReset delivery: receiver detects initiator crash ──────────────
+// A receives PeerReset when B crashes, restarts on the same address, and
+// B2 initiates a new connection. A detects the restart via SYN from a
+// previously-Established address with a different incarnation.
+
+// Helper: build default test config
+fn test_config() -> KcpConfig {
+    KcpConfig::builder()
+        .tick_interval(Duration::from_millis(10))
+        .session_timeout(Duration::from_secs(60))
+        .kcp_nodelay(2, 10, 2, true)
+        .rx_minrto(10)
+        .fast_resend(1)
+        .build()
+}
+
+// Simplified: verify that A (the initiator) receives Connected after send()
+#[tokio::test]
+async fn initiator_gets_connected_event() {
+    let a = KcpPeer::bind_with("127.0.0.1:0", test_config())
+        .await
+        .expect("bind A");
+    let b = KcpPeer::bind_with("127.0.0.1:9901", test_config())
+        .await
+        .expect("bind B");
+    let addr_b = b.local_addr();
+    let mut events_a = a.events();
+
+    a.send(addr_b, b"hello").await.expect("A send");
+    let connected = wait_for(
+        &mut events_a,
+        |e| matches!(e, Event::Connected(_)),
+        Duration::from_secs(5),
+    )
+    .await;
+    assert!(matches!(connected, Event::Connected(_)));
+
+    drop(a);
+    drop(b);
+}
+
+#[tokio::test]
+async fn peer_reset_detection() {
+    let a = KcpPeer::bind_with("127.0.0.1:0", test_config())
+        .await
+        .expect("bind A");
+    let b = KcpPeer::bind_with("127.0.0.1:9900", test_config())
+        .await
+        .expect("bind B");
+    let addr_b = b.local_addr();
+    let mut events_a = a.events();
+
+    // 1. A → B establishes session, data flows
+    a.send(addr_b, b"first").await.expect("A send");
+
+    // A should receive Connected (fired by initiate_session)
+    let _ = wait_for(
+        &mut events_a,
+        |e| matches!(e, Event::Connected(_)),
+        Duration::from_secs(5),
+    )
+    .await;
+
+    // Confirm data arrived at B too (so session is fully established)
+    let mut events_b = b.events();
+    let _ = wait_for(
+        &mut events_b,
+        |e| matches!(e, Event::Connected(_)),
+        Duration::from_secs(5),
+    )
+    .await;
+    let _ = wait_for(
+        &mut events_b,
+        |e| matches!(e, Event::Data(..)),
+        Duration::from_secs(5),
+    )
+    .await;
+    drop(events_b);
+
+    let addr_a = a.local_addr();
+
+    // 2. B crashes
+    drop(b);
+    sleep(Duration::from_millis(100)).await;
+
+    // 3. B2 rebinds the same address as B
+    let b2 = KcpPeer::bind_with(addr_b, test_config())
+        .await
+        .expect("rebind B on same address");
+
+    // 4. B2 initiates to A — SYN from an address A already has an Established session for
+    b2.send(addr_a, b"after_restart")
+        .await
+        .expect("B2 send");
+
+    // 5. A detects crash: old Established session for B's address → PeerReset
+    let peer_reset = wait_for(
+        &mut events_a,
+        |e| matches!(e, Event::PeerReset(_)),
+        Duration::from_secs(5),
+    )
+    .await;
+    assert!(matches!(peer_reset, Event::PeerReset(addr) if addr == addr_b));
+
+    // 6. New session established → Connected
+    let connected = wait_for(
+        &mut events_a,
+        |e| matches!(e, Event::Connected(_)),
+        Duration::from_secs(5),
+    )
+    .await;
+    assert!(matches!(connected, Event::Connected(addr) if addr == addr_b));
+
+    // 7. Data from B2 arrives at A
+    let data = wait_for(
+        &mut events_a,
+        |e| matches!(e, Event::Data(..)),
+        Duration::from_secs(5),
+    )
+    .await;
+    match data {
+        Event::Data(addr, msg) => {
+            assert_eq!(addr, addr_b);
+            assert_eq!(&msg[..], b"after_restart");
         }
         _ => unreachable!(),
     }
