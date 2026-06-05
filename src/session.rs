@@ -4,7 +4,6 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
-use atomic_waker::AtomicWaker;
 use bytes::BytesMut;
 use kcp::Kcp;
 use tokio::net::UdpSocket;
@@ -46,7 +45,6 @@ pub struct SessionInner {
     pub conv_id: u32,
     pub state: SessionState,
     pub incarnation: u64,
-    pub recv_buf: BytesMut,
 }
 
 /// Session state machine.
@@ -111,7 +109,6 @@ pub enum SessionState {
 /// A peer session. Clone-friendly (Arc internals).
 pub struct Session {
     pub inner: std::sync::Mutex<SessionInner>,
-    pub waker: AtomicWaker,
     pub closed: AtomicBool,
     pub last_rx: AtomicU64,
     pub peer_addr: SocketAddr,
@@ -160,12 +157,10 @@ impl Session {
             conv_id,
             state: SessionState::SynSent,
             incarnation: _incarnation,
-            recv_buf: BytesMut::with_capacity(2048),
         };
 
         Arc::new(Self {
             inner: std::sync::Mutex::new(inner),
-            waker: AtomicWaker::new(),
             closed: AtomicBool::new(false),
             last_rx: AtomicU64::new(now),
             peer_addr,
@@ -201,12 +196,10 @@ impl Session {
             conv_id,
             state: SessionState::Established,
             incarnation: _incarnation,
-            recv_buf: BytesMut::with_capacity(2048),
         };
 
         Arc::new(Self {
             inner: std::sync::Mutex::new(inner),
-            waker: AtomicWaker::new(),
             closed: AtomicBool::new(false),
             last_rx: AtomicU64::new(epoch_ms()),
             peer_addr,
@@ -219,7 +212,6 @@ impl Session {
     /// Mark session as closed and wake any blocked reader.
     pub fn mark_closed(&self) {
         self.closed.store(true, Ordering::Release);
-        self.waker.wake();
     }
 
     /// Send data through this session.
@@ -237,17 +229,6 @@ impl Session {
         }
         if inner.kcp.is_dead_link() {
             return Err(Error::DeadLink);
-        }
-        Ok(())
-    }
-
-    /// Explicitly flush queued data. No-op for non-Established sessions.
-    pub fn flush(&self) -> Result<()> {
-        let mut inner = self.inner.lock().unwrap();
-        if matches!(inner.state, SessionState::Established) {
-            let now = current_ms();
-            inner.kcp.update(now)?;
-            inner.kcp.flush()?;
         }
         Ok(())
     }
@@ -270,29 +251,11 @@ impl Session {
         Ok(inner.kcp.wait_snd())
     }
 
-    /// Feed incoming KCP data. Wakes reader only if data becomes readable.
+    /// Feed incoming KCP data.
     pub fn input(&self, data: &[u8]) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
         inner.kcp.input(data)?;
-        if inner.kcp.peeksize().is_ok() {
-            self.waker.wake();
-        }
         Ok(())
-    }
-
-    /// Try to extract a complete message. Returns `Some(data)` if available.
-    /// Call after `input()` to drain newly arrived messages.
-    pub fn try_recv(&self) -> Result<Option<BytesMut>> {
-        let mut inner = self.inner.lock().unwrap();
-        match inner.kcp.peeksize() {
-            Ok(size) => {
-                let mut buf = BytesMut::zeroed(size);
-                inner.kcp.recv(&mut buf)?;
-                Ok(Some(buf))
-            }
-            Err(kcp::Error::RecvQueueEmpty) => Ok(None),
-            Err(e) => Err(Error::Kcp(e)),
-        }
     }
 
     /// Drain all available messages into `out`, holding the lock for the entire drain.
@@ -304,47 +267,6 @@ impl Session {
             out.push(buf);
         }
         Ok(())
-    }
-
-    /// Peek at the next message size.
-    pub fn peeksize(&self) -> Result<usize> {
-        let inner = self.inner.lock().unwrap();
-        Ok(inner.kcp.peeksize()?)
-    }
-
-    /// Receive into user buffer. Returns bytes written.
-    /// If user buffer is too small, spills remainder to recv_buf.
-    pub fn recv_into(&self, buf: &mut [u8]) -> Result<usize> {
-        let mut inner = self.inner.lock().unwrap();
-
-        if !inner.recv_buf.is_empty() {
-            let to_copy = std::cmp::min(buf.len(), inner.recv_buf.len());
-            buf[..to_copy].copy_from_slice(&inner.recv_buf[..to_copy]);
-            if to_copy < inner.recv_buf.len() {
-                let remaining = inner.recv_buf.split_off(to_copy);
-                inner.recv_buf = remaining;
-            } else {
-                inner.recv_buf.clear();
-            }
-            return Ok(to_copy);
-        }
-
-        match inner.kcp.peeksize() {
-            Ok(size) if size > buf.len() => {
-                let mut tmp = vec![0u8; size];
-                let n = inner.kcp.recv(&mut tmp)?;
-                let to_copy = std::cmp::min(buf.len(), n);
-                buf[..to_copy].copy_from_slice(&tmp[..to_copy]);
-                if to_copy < n {
-                    inner.recv_buf.extend_from_slice(&tmp[to_copy..n]);
-                }
-                Ok(to_copy)
-            }
-            _ => {
-                let n = inner.kcp.recv(buf)?;
-                Ok(n)
-            }
-        }
     }
 
     /// Retransmit SYN if session is still in SynSent and retry interval has elapsed.

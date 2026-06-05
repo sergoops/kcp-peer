@@ -1,7 +1,6 @@
 use std::time::Duration;
 
 use kcp_peer::{Event, KcpConfig, KcpPeer};
-use tokio::io::AsyncWriteExt;
 use tokio::time::sleep;
 
 const CLIENT_ADDR: &str = "127.0.0.1:9900";
@@ -41,12 +40,8 @@ async fn main() {
             .expect("bind client");
         let mut events = client.events();
 
-        let mut conn = client
-            .connect(SERVER_ADDR.parse().unwrap())
-            .await;
-
-        conn.write_all(payload).await.expect("write");
-        conn.flush().await.expect("flush");
+        let server_addr = SERVER_ADDR.parse().unwrap();
+        client.send(server_addr, payload).await.expect("send");
 
         loop {
             match events.recv().await {
@@ -61,7 +56,6 @@ async fn main() {
             }
         }
 
-        drop(conn);
         drop(client);
     }
 

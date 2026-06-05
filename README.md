@@ -9,7 +9,6 @@ Symmetric P2P transport layer around [KCP](https://github.com/skywind3000/kcp) u
 - **Auto-initiate** — first `send()` to an unknown peer triggers an automatic handshake.
 - **Crash recovery** — when a peer restarts on the same address, the other side detects it via incarnation mismatch and fires `PeerRestarted`.
 - **Event-driven API** — `Connected`, `Disconnected`, `Data`, `PeerRestarted` via broadcast channel.
-- **Tokio integration** — `KcpConnection` implements `AsyncRead` + `AsyncWrite` for use with tokio framing utilities.
 - **Fully configurable** — all KCP parameters exposed via builder.
 
 ## Quick Start
@@ -80,7 +79,6 @@ Main handle. Binds a UDP socket and spawns background receive + update tasks. Cl
 | `bind(addr)` | Bind with default config |
 | `bind_with(addr, config)` | Bind with custom config |
 | `send(peer, data)` | Send to peer; auto-initiates handshake if needed |
-| `connect(peer)` | Initiate (or return existing) `KcpConnection` |
 | `events()` | Subscribe to the event broadcast channel |
 | `peers()` | List connected peer addresses |
 | `stats(peer)` | KCP stats for a specific peer |
@@ -89,10 +87,6 @@ Main handle. Binds a UDP socket and spawns background receive + update tasks. Cl
 | `local_addr()` | Bound socket address |
 
 Dropping `KcpPeer` cancels background tasks (shutdown token). The UDP socket closes when all references are released.
-
-### `KcpConnection`
-
-An `AsyncRead` + `AsyncWrite` handle wrapping a peer session. Obtained via `connect()`. Composes with tokio framing (`Framed`, `LengthDelimitedCodec`, etc.).
 
 ### `Event`
 
@@ -105,7 +99,7 @@ Events delivered via a `tokio::sync::broadcast` channel.
 | `Data(SocketAddr, Bytes)` | Application data received from peer |
 | `PeerRestarted(SocketAddr)` | Peer restarted — old session was replaced by a new incarnation |
 
-`Data` events are only emitted when `receiver_count() > 0`. If no event subscribers exist, `KcpConnection::poll_read` reads directly from KCP. When subscribers exist, KCP messages are drained into events and `poll_read` returns `Pending`.
+`Data` events are only emitted when `receiver_count() > 0`. If no event subscribers exist, incoming data is still received by KCP but not drained into events. When subscribers exist, KCP messages are drained into events and `poll_read` returns `Pending`.
 
 ### `KcpConfig`
 
@@ -285,7 +279,6 @@ mid-execution never leaves internal state inconsistent or leaks resources:
 | `send()` / `connect()` | Session is created and inserted into the map in synchronous code after the only await point. If cancelled during `initiate_session`, no session record is created. |
 | `shutdown()` | RESET packets are sent synchronously before the first await. The cancellation token is already fired when the await runs, so background tasks still exit promptly. |
 | `events()` → `recv()` | `broadcast::Receiver::recv` is cancel-safe (tokio guarantee). Dropping the future does not consume the event. |
-| `KcpConnection::poll_*` | All methods are synchronous (`Poll::Ready`). No waker registration that would leave dangling state on drop. |
 
 No special combinator usage is required on your side — `tokio::select!`,
 `join!`, `spawn`, or direct `.await` all work correctly.

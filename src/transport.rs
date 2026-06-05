@@ -12,7 +12,6 @@ use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::KcpConfig;
-use crate::connection::KcpConnection;
 use crate::error::Result;
 use crate::packet::{self, PacketType};
 use crate::session::{self, epoch_ms, Session, SessionState};
@@ -37,8 +36,6 @@ pub enum Event {
     ///
     /// Only emitted when there are event subscribers
     /// ([`receiver_count() > 0`](broadcast::Sender::receiver_count)).
-    /// When no event subscribers exist, [`KcpConnection::poll_read`](crate::KcpConnection)
-    /// reads directly from KCP instead.
     Data(SocketAddr, Bytes),
     /// Handshake completed or inbound connection accepted.
     ///
@@ -67,8 +64,8 @@ pub enum Event {
     /// [`bind`](crate::KcpPeer::bind)).
     ///
     /// Always followed by [`Connected`](Event::Connected) for the new session.
-    /// The old session handle is now stale — obtain a new one via
-    /// [`connect()`](crate::KcpPeer::connect).
+    /// The old session handle is now stale — call [`send()`](crate::KcpPeer::send)
+    /// to use the new session.
     PeerRestarted(SocketAddr),
 }
 
@@ -85,7 +82,7 @@ pub type EventReceiver = broadcast::Receiver<Event>;
 ///
 /// 1. **Bind** — [`bind()`](KcpPeer::bind) or [`bind_with()`](KcpPeer::bind_with)
 ///    binds a UDP socket and spawns background receive + update tasks.
-/// 2. **Connect** — first [`send()`](KcpPeer::send) or [`connect()`](KcpPeer::connect)
+/// 2. **Connect** — first [`send()`](KcpPeer::send)
 ///    to an unknown address auto-creates a session and sends a `SYN` handshake.
 ///    Data queued during the handshake is buffered and flushed once the session
 ///    is established.
@@ -108,8 +105,8 @@ pub type EventReceiver = broadcast::Receiver<Event>;
 ///
 /// All async methods on `KcpPeer` are **cancel-safe**:
 ///
-/// - [`send`](KcpPeer::send) and [`connect`](KcpPeer::connect) either complete fully
-///   (session created, data queued) or leave no state behind. No intermediate
+/// - [`send`](KcpPeer::send) either completes fully
+///   (session created, data queued) or leaves no state behind. No intermediate
 ///   session leaks if the future is dropped mid-flight.
 /// - [`shutdown`](KcpPeer::shutdown) sends RESETs synchronously then awaits
 ///   background tasks; cancellation during the await leaves tasks that still
@@ -257,48 +254,6 @@ impl KcpPeer {
                 session.send_data(data)
             }
         }
-    }
-
-    /// Initiate (or return existing) connection to a peer.
-    ///
-    /// Idempotent — returns the existing `KcpConnection` if the session already exists.
-    /// Never fails: even if the SYN send fails, the session is created and
-    /// the background update task will retry the handshake with exponential backoff.
-    ///
-    /// **Non-blocking:** the handshake proceeds asynchronously — this method sends
-    /// the SYN and returns immediately. The returned [`KcpConnection`](crate::KcpConnection)
-    /// is usable right away; data written to it before the handshake completes is
-    /// buffered and flushed automatically once the session is established.
-    /// Subscribe to [`events()`](KcpPeer::events) and wait for
-    /// [`Event::Connected`](Event::Connected) to be notified when the session
-    /// is ready for data transfer.
-    ///
-    /// The returned handle implements [`AsyncRead`](tokio::io::AsyncRead) +
-    /// [`AsyncWrite`](tokio::io::AsyncWrite) for use with tokio framing utilities
-    /// (`Framed`, `LengthDelimitedCodec`, etc.).
-    ///
-    /// # Interaction with event subscribers
-    ///
-    /// When event subscribers exist (via [`events()`](KcpPeer::events)),
-    /// incoming data is drained into [`Event::Data`](crate::Event::Data) and
-    /// [`KcpConnection::poll_read`](crate::KcpConnection) returns `Pending`.
-    /// To read via [`KcpConnection`](crate::KcpConnection), avoid subscribing to
-    /// events, or read data from [`Event::Data`](crate::Event::Data) instead.
-    ///
-    /// # Cancel safety
-    ///
-    /// Cancel-safe. Same semantics as [`send`](KcpPeer::send) — no partial state
-    /// is left behind if the future is dropped mid-flight.
-    pub async fn connect(&self, peer: SocketAddr) -> KcpConnection {
-        let can = canonicalize(peer);
-
-        // fast path: existing session
-        if let Some(s) = self.sessions.read().unwrap().get(&can) {
-            return KcpConnection::new(s.clone());
-        }
-
-        let session = self.initiate_session(peer).await;
-        KcpConnection::new(session)
     }
 
     /// Initiate a session to a peer (handshake).
@@ -588,8 +543,7 @@ async fn handle_incoming(
                 Some(s) => {
                     s.last_rx.store(epoch_ms(), Ordering::Release);
                     s.input(payload)?;
-                    // Only drain messages for event subscribers; otherwise
-                    // KcpConnection::poll_read reads directly from KCP.
+                    // Drain KCP messages into events for subscribers.
                     if event_tx.receiver_count() > 0 {
                         let mut msgs = Vec::new();
                         s.try_recv_all(&mut msgs)?;

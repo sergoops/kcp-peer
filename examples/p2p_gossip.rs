@@ -1,7 +1,6 @@
 use std::time::Duration;
 
 use kcp_peer::{Event, KcpConfig, KcpPeer};
-use tokio::io::AsyncWriteExt;
 
 const PORTS: &[u16] = &[9879, 9880, 9881];
 
@@ -24,12 +23,9 @@ async fn main() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     for &port in &PORTS[1..] {
-        let mut conn = node0
-            .connect(format!("127.0.0.1:{port}").parse().unwrap())
-            .await;
+        let addr = format!("127.0.0.1:{port}").parse().unwrap();
         let msg = format!("hello from node 0 to node {port}");
-        conn.write_all(msg.as_bytes()).await.unwrap();
-        conn.flush().await.unwrap();
+        node0.send(addr, msg.as_bytes()).await.unwrap();
         println!("node0: sent to {port}");
     }
 

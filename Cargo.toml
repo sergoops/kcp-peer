@@ -12,7 +12,6 @@ thiserror = "2"
 rand = "0.9"
 tracing = "0.1"
 tokio-util = { version = "0.7", features = ["rt"] }
-atomic-waker = "1.1"
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

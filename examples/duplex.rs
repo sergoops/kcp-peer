@@ -1,7 +1,6 @@
 use std::time::Duration;
 
 use kcp_peer::{Event, KcpConfig, KcpPeer};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[tokio::main]
 async fn main() {
@@ -39,20 +38,25 @@ async fn main() {
         .await
         .expect("bind client");
 
-    let mut conn = client
-        .connect("127.0.0.1:9877".parse().unwrap())
-        .await;
+    let mut client_events = client.events();
+    let server_addr = "127.0.0.1:9877".parse().unwrap();
 
     for msg in &["hello", "world", "from", "client"] {
-        conn.write_all(msg.as_bytes()).await.unwrap();
-        conn.flush().await.unwrap();
+        client
+            .send(server_addr, msg.as_bytes())
+            .await
+            .expect("send");
         println!("client: sent \"{msg}\"");
     }
 
     for _ in 0..4 {
-        let mut buf = [0u8; 64];
-        let n = conn.read(&mut buf).await.unwrap();
-        println!("client: got \"{}\"", String::from_utf8_lossy(&buf[..n]));
+        match tokio::time::timeout(Duration::from_secs(5), client_events.recv()).await {
+            Ok(Ok(Event::Data(_, data))) => {
+                println!("client: got \"{}\"", String::from_utf8_lossy(&data));
+            }
+            Ok(Ok(_)) => continue,
+            Ok(Err(_)) | Err(_) => panic!("timeout or channel closed"),
+        }
     }
 
     println!("duplex done");
