@@ -1,7 +1,11 @@
 use std::time::Duration;
 
 use kcp_peer::{Event, KcpConfig, KcpPeer};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
+use tokio::time::sleep;
+
+const CLIENT_ADDR: &str = "127.0.0.1:9900";
+const SERVER_ADDR: &str = "127.0.0.1:9876";
 
 #[tokio::main]
 async fn main() {
@@ -12,48 +16,62 @@ async fn main() {
         .fast_resend(1)
         .build();
 
-    let server = KcpPeer::bind_with("127.0.0.1:9876", config.clone())
+    // ── Server ──
+    let server = KcpPeer::bind_with(SERVER_ADDR, config.clone())
         .await
         .expect("bind server");
-
-    let mut events = server.events();
-
+    let mut server_events = server.events();
     tokio::spawn(async move {
         loop {
-            match events.recv().await {
+            match server_events.recv().await {
                 Ok(Event::Data(addr, data)) => {
-                    println!("server: got {} bytes from {addr}", data.len());
+                    println!("server: echo {} bytes to {addr}", data.len());
                     let _ = server.send(addr, &data).await;
                 }
-                Ok(Event::Connected(addr)) => {
-                    println!("server: connected {addr}");
-                }
-                Ok(Event::Disconnected(addr)) => {
-                    println!("server: disconnected {addr}");
-                }
-                Ok(Event::PeerRestarted(addr)) => {
-                    println!("server: peer restarted {addr}");
-                }
+                Ok(ev) => println!("server: {ev:?}"),
                 Err(_) => break,
             }
         }
     });
 
-    let client = KcpPeer::bind_with("127.0.0.1:0", config)
-        .await
-        .expect("bind client");
+    // ── Helper: run one client incarnation ──
+    async fn run_client(label: &str, addr: &str, payload: &[u8], config: KcpConfig) {
+        let client = KcpPeer::bind_with(addr, config)
+            .await
+            .expect("bind client");
+        let mut events = client.events();
 
-    let mut conn = client
-        .connect("127.0.0.1:9876".parse().unwrap())
-        .await
-        .expect("connect");
+        let mut conn = client
+            .connect(SERVER_ADDR.parse().unwrap())
+            .await
+            .expect("connect");
 
-    let payload = b"hello kcp_peer";
-    conn.write_all(payload).await.expect("write");
-    conn.flush().await.expect("flush");
+        conn.write_all(payload).await.expect("write");
+        conn.flush().await.expect("flush");
 
-    let mut response = vec![0u8; payload.len()];
-    conn.read_exact(&mut response).await.expect("read");
-    assert_eq!(&response, payload);
-    println!("echo OK");
+        loop {
+            match events.recv().await {
+                Ok(Event::Data(peer, data)) => {
+                    println!("{label}: Data({peer}, {:?})", std::str::from_utf8(&data));
+                    assert_eq!(&data[..], payload);
+                    println!("{label}: echo OK");
+                    break;
+                }
+                Ok(ev) => println!("{label}: {ev:?}"),
+                Err(_) => break,
+            }
+        }
+
+        drop(conn);
+        drop(client);
+    }
+
+    // ── Client v1 ──
+    run_client("client[v1]", CLIENT_ADDR, b"hello v1", config.clone()).await;
+
+    // ── Crash + wait ──
+    sleep(Duration::from_millis(100)).await;
+
+    // ── Client v2 (restart on same port) ──
+    run_client("client[v2]", CLIENT_ADDR, b"hello v2 (after restart)", config).await;
 }
