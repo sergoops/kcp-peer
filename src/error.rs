@@ -13,7 +13,7 @@ use std::net::SocketAddr;
 /// | [`DeadLink`](Error::DeadLink) | [`send()`](crate::KcpPeer::send) while KCP retransmissions are exhausted | The peer is unreachable or crashed without RESET. Call [`send()`](crate::KcpPeer::send) again to re-initiate a handshake. |
 /// | [`ShuttingDown`](Error::ShuttingDown) | [`send()`](crate::KcpPeer::send) after [`shutdown()`](crate::KcpPeer::shutdown) | Create a new [`KcpPeer`](crate::KcpPeer) if the transport should continue. |
 /// | [`EventChannelLagged`](Error::EventChannelLagged) | Slow consumer on [`events()`](crate::KcpPeer::events) broadcast | Increase [`event_channel_capacity`](crate::KcpConfig::event_channel_capacity) or poll faster. |
-/// | [`SessionClosed`](Error::SessionClosed) | [`send()`](crate::KcpPeer::send) or async read on a closed session | The session was already removed (timeout, RESET, or [`disconnect()`](crate::KcpPeer::disconnect)). Call [`send()`](crate::KcpPeer::send) again to auto-reconnect. |
+/// | [`SessionClosed`](Error::SessionClosed) | [`send()`](crate::KcpPeer::send) on a closed session | The session was already removed (timeout, RESET, or [`disconnect()`](crate::KcpPeer::disconnect)). Call [`send()`](crate::KcpPeer::send) again to auto-reconnect. |
 ///
 /// Most non-fatal errors can be handled by simply re-sending the data —
 /// [`send()`](crate::KcpPeer::send) will auto-initiate a new handshake if the session is gone.

@@ -53,7 +53,7 @@ pub struct SessionInner {
 ///                         ┌──────────────────────────┐
 ///                         │      No session           │
 ///                         └───────────┬──────────────┘
-///                                     │ send() / connect()
+///                                     │ send()
 ///                                     │ (or incoming SYN)
 ///                                     v
 ///                         ┌──────────────────────────┐
@@ -220,7 +220,7 @@ impl Session {
         })
     }
 
-    /// Mark session as closed and wake any blocked reader.
+    /// Mark session as closed.
     pub fn mark_closed(&self) {
         self.closed.store(true, Ordering::Release);
     }

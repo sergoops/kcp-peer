@@ -45,7 +45,7 @@ pub struct KcpConfig {
     /// - T+2.25s — retry 4
     /// - T+4.65s — retry 5, then [`DeadLink`](crate::Error::DeadLink)
     ///
-    /// The initial SYN is sent immediately in [`new_outbound()`](crate::Session::new_outbound);
+    /// The initial SYN is sent in [`initiate_session`](crate::KcpPeer::send);
     /// only subsequent retries follow this schedule.
     pub syn_retry_interval: Duration,
     /// Maximum number of SYN retransmissions before the handshake is abandoned

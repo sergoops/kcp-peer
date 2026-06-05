@@ -99,7 +99,7 @@ Events delivered via a `tokio::sync::broadcast` channel.
 | `Data(SocketAddr, Bytes)` | Application data received from peer |
 | `PeerRestarted(SocketAddr)` | Peer restarted — old session was replaced by a new incarnation |
 
-`Data` events are only emitted when `receiver_count() > 0`. If no event subscribers exist, incoming data is still received by KCP but not drained into events. When subscribers exist, KCP messages are drained into events and `poll_read` returns `Pending`.
+`Data` events are only emitted when `receiver_count() > 0`. If no event subscribers exist, incoming data is still received by KCP but not drained into events. When subscribers exist, KCP messages are drained into events — there is no other read path.
 
 ### `KcpConfig`
 
@@ -146,8 +146,8 @@ Initiator                    Receiver
 
 Auto-initiate: when `send()` is called for an unknown address, a new session is created in `SynSent` state and a SYN is sent. The handshake completes asynchronously; queued data is flushed once the session transitions to `Established`.
 
-**Non-blocking semantics:** both `connect()` and `send()` return immediately
-after dispatching the SYN — they never wait for the handshake to complete.
+**Non-blocking semantics:** `send()` returns immediately
+after dispatching the SYN — it never waits for the handshake to complete.
 Data sent during `SynSent` is buffered in KCP and transmitted automatically
 once the session reaches `Established`.
 
@@ -225,7 +225,7 @@ Every peer session follows this state machine:
 
 ### How to reconnect
 
-In all cases except crash recovery, simply call `send()` or `connect()` again —
+In all cases except crash recovery, simply call `send()` again —
 the transport will automatically initiate a fresh handshake.
 
 ## Error Handling
@@ -276,7 +276,7 @@ mid-execution never leaves internal state inconsistent or leaks resources:
 | API | Why it's safe |
 |-----|---------------|
 | `bind_with()` | Only one await (`UdpSocket::bind`); cancellation before completion creates no state. |
-| `send()` / `connect()` | Session is created and inserted into the map in synchronous code after the only await point. If cancelled during `initiate_session`, no session record is created. |
+| `send()` | Session is created and inserted into the map in synchronous code after the only await point. If cancelled during `initiate_session`, no session record is created. |
 | `shutdown()` | RESET packets are sent synchronously before the first await. The cancellation token is already fired when the await runs, so background tasks still exit promptly. |
 | `events()` → `recv()` | `broadcast::Receiver::recv` is cancel-safe (tokio guarantee). Dropping the future does not consume the event. |
 

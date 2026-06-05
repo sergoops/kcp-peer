@@ -494,7 +494,6 @@ fn spawn_update_task(
                                 Ok(_) => {}
                             }
 
-                            // SYN retry for handshake-in-progress sessions
                             match sess.maybe_retry_syn(&config, now_epoch) {
                                 Err(crate::error::Error::DeadLink) => {
                                     to_remove.push(*can);
@@ -504,7 +503,6 @@ fn spawn_update_task(
                                 Ok(_) => {}
                             }
 
-                            // session timeout check
                             let last_rx_ms = sess.last_rx.load(Ordering::Acquire);
                             if last_rx_ms > 0 {
                                 let age = Duration::from_millis(now_epoch.saturating_sub(last_rx_ms));
