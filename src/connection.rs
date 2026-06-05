@@ -34,7 +34,11 @@ impl AsyncRead for KcpConnection {
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
 
-        if this.session.closed.load(std::sync::atomic::Ordering::Acquire) {
+        if this
+            .session
+            .closed
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
             return Poll::Ready(Err(io::Error::new(
                 io::ErrorKind::ConnectionReset,
                 "session closed",
@@ -93,7 +97,11 @@ impl AsyncWrite for KcpConnection {
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
 
-        if this.session.closed.load(std::sync::atomic::Ordering::Acquire) {
+        if this
+            .session
+            .closed
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
             return Poll::Ready(Err(io::Error::new(
                 io::ErrorKind::ConnectionReset,
                 "session closed",

@@ -25,9 +25,7 @@ impl Write for DirectOutput {
         let packet = packet::encode_kcp_data(buf);
         match self.socket.try_send_to(&packet, self.peer) {
             Ok(n) => Ok(n.saturating_sub(1)),
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                Ok(buf.len())
-            }
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => Ok(buf.len()),
             Err(e) => Err(e),
         }
     }

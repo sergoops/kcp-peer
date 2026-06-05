@@ -57,7 +57,10 @@ impl KcpPeer {
     }
 
     /// Bind to a local address with the given config.
-    pub async fn bind_with(addr: impl tokio::net::ToSocketAddrs, config: KcpConfig) -> Result<Self> {
+    pub async fn bind_with(
+        addr: impl tokio::net::ToSocketAddrs,
+        config: KcpConfig,
+    ) -> Result<Self> {
         let socket = Arc::new(UdpSocket::bind(addr).await?);
         let local_addr = socket.local_addr()?;
         let incarnation = rand::rng().random::<u64>();
@@ -142,7 +145,8 @@ impl KcpPeer {
             self.socket.clone(),
             self.incarnation,
             self.config.as_ref(),
-        ).await?;
+        )
+        .await?;
 
         let can = canonicalize(peer);
         {
@@ -213,7 +217,6 @@ impl KcpPeer {
         self._recv_handle.await.ok();
         self._update_handle.await.ok();
     }
-
 }
 
 /// Per-peer connection statistics.
@@ -404,7 +407,11 @@ async fn handle_incoming(
                 send_ack_to: Option<SocketAddr>,
                 ack_conv: u32,
             }
-            enum SynAction { CreateNew, KeepExisting, Ignore }
+            enum SynAction {
+                CreateNew,
+                KeepExisting,
+                Ignore,
+            }
 
             let result = {
                 let map = sessions.read().unwrap();
@@ -448,7 +455,11 @@ async fn handle_incoming(
                 };
                 // map read lock dropped here
 
-                SynResult { action, send_ack_to, ack_conv }
+                SynResult {
+                    action,
+                    send_ack_to,
+                    ack_conv,
+                }
             };
 
             // Send SYN_ACK if needed (no locks held)
@@ -459,7 +470,9 @@ async fn handle_incoming(
 
             match result.action {
                 SynAction::CreateNew => {
-                    let session = Session::new_inbound(conv, from, socket.clone(), incarnation, config).await?;
+                    let session =
+                        Session::new_inbound(conv, from, socket.clone(), incarnation, config)
+                            .await?;
                     let mut map = sessions.write().unwrap();
                     map.insert(can, session.clone());
                     let _ = event_tx.send(Event::Connected(from));

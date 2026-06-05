@@ -39,7 +39,9 @@ async fn main() {
         }
     });
 
-    let client = KcpPeer::bind_with("127.0.0.1:0", config).await.expect("bind client");
+    let client = KcpPeer::bind_with("127.0.0.1:0", config)
+        .await
+        .expect("bind client");
 
     let mut conn = client
         .connect("127.0.0.1:9876".parse().unwrap())
