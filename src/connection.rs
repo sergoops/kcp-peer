@@ -119,8 +119,8 @@ impl AsyncWrite for KcpConnection {
             Ok(()) => Poll::Ready(Ok(buf.len())),
             Err(e) => {
                 let io_err = match &e {
-                    Error::SessionClosed => {
-                        io::Error::new(io::ErrorKind::ConnectionReset, "session closed")
+                    Error::SessionClosed | Error::DeadLink => {
+                        io::Error::new(io::ErrorKind::ConnectionReset, e.to_string())
                     }
                     _ => {
                         this.session.waker.register(cx.waker());
@@ -133,7 +133,17 @@ impl AsyncWrite for KcpConnection {
     }
 
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Poll::Ready(Ok(()))
+        let this = self.get_mut();
+        if this.session.closed.load(std::sync::atomic::Ordering::Acquire) {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::ConnectionReset,
+                "session closed",
+            )));
+        }
+        match this.session.flush() {
+            Ok(()) => Poll::Ready(Ok(())),
+            Err(e) => Poll::Ready(Err(io::Error::other(e))),
+        }
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {

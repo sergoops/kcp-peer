@@ -353,6 +353,7 @@ fn spawn_update_task(
 
                 _ = tick.tick() => {
                     let now_ms = session::current_ms();
+                    let now_epoch = epoch_ms();
                     let mut to_remove: Vec<CanonicalAddr> = Vec::new();
 
                     {
@@ -362,28 +363,21 @@ fn spawn_update_task(
                                 continue;
                             }
 
-                            let is_established = {
-                                let inner = sess.inner.lock().unwrap();
-                                matches!(inner.state, SessionState::Established)
-                            };
-
-                            if is_established {
-                                match sess.update(now_ms) {
-                                    Err(crate::error::Error::DeadLink) => {
-                                        to_remove.push(*can);
-                                        continue;
-                                    }
-                                    Err(e) => {
-                                        tracing::debug!("update error for {}: {e}", sess.peer_addr);
-                                    }
-                                    Ok(_) => {}
+                            match sess.update(now_ms) {
+                                Err(crate::error::Error::DeadLink) => {
+                                    to_remove.push(*can);
+                                    continue;
                                 }
+                                Err(e) => {
+                                    tracing::debug!("update error for {}: {e}", sess.peer_addr);
+                                }
+                                Ok(_) => {}
                             }
 
                             // session timeout check
                             let last_rx_ms = sess.last_rx.load(Ordering::Acquire);
                             if last_rx_ms > 0 {
-                                let age = Duration::from_millis(epoch_ms().saturating_sub(last_rx_ms));
+                                let age = Duration::from_millis(now_epoch.saturating_sub(last_rx_ms));
                                 if age > config.session_timeout {
                                     to_remove.push(*can);
                                 }
@@ -433,7 +427,9 @@ async fn handle_incoming(
                     // Only drain messages for event subscribers; otherwise
                     // KcpConnection::poll_read reads directly from KCP.
                     if event_tx.receiver_count() > 0 {
-                        while let Some(msg) = s.try_recv()? {
+                        let mut msgs = Vec::new();
+                        s.try_recv_all(&mut msgs)?;
+                        for msg in msgs {
                             let _ = event_tx.send(Event::Data(s.peer_addr, msg.freeze()));
                         }
                     }
@@ -499,6 +495,7 @@ async fn handle_incoming(
                                 inner.state = SessionState::Established;
                                 session.last_rx.store(epoch_ms(), Ordering::Release);
                                 let _ = inner.kcp.update(session::current_ms());
+                                let _ = inner.kcp.flush();
                                 send_ack_to = Some(from);
                                 ack_conv = old_conv;
                             }
@@ -558,6 +555,7 @@ async fn handle_incoming(
                         s.last_rx.store(epoch_ms(), Ordering::Release);
                         // flush any data that was queued during handshake
                         let _ = inner.kcp.update(session::current_ms());
+                        let _ = inner.kcp.flush();
                         let _ = event_tx.send(Event::Connected(from));
                     }
                 }

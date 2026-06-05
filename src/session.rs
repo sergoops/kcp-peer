@@ -19,12 +19,16 @@ use crate::packet::{self, PacketType};
 pub struct DirectOutput {
     pub socket: Arc<UdpSocket>,
     pub peer: SocketAddr,
+    buf: BytesMut,
 }
 
 impl Write for DirectOutput {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let packet = packet::encode_kcp_data(buf);
-        match self.socket.try_send_to(&packet, self.peer) {
+        self.buf.clear();
+        self.buf.reserve(1 + buf.len());
+        self.buf.extend_from_slice(&[PacketType::KcpData as u8]);
+        self.buf.extend_from_slice(buf);
+        match self.socket.try_send_to(&self.buf, self.peer) {
             Ok(n) => Ok(n.saturating_sub(1)),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => Ok(buf.len()),
             Err(e) => Err(e),
@@ -84,6 +88,7 @@ impl Session {
         let output = DirectOutput {
             socket: socket.clone(),
             peer: peer_addr,
+            buf: BytesMut::with_capacity(1500),
         };
         let mut kcp = Kcp::new(conv_id, output);
         config.apply_to(&mut kcp);
@@ -99,7 +104,7 @@ impl Session {
             conv_id,
             state: SessionState::SynSent,
             incarnation: _incarnation,
-            recv_buf: BytesMut::new(),
+            recv_buf: BytesMut::with_capacity(2048),
         };
 
         Ok(Arc::new(Self {
@@ -122,6 +127,7 @@ impl Session {
         let output = DirectOutput {
             socket: socket.clone(),
             peer: peer_addr,
+            buf: BytesMut::with_capacity(1500),
         };
         let mut kcp = Kcp::new(conv_id, output);
         config.apply_to(&mut kcp);
@@ -136,7 +142,7 @@ impl Session {
             conv_id,
             state: SessionState::Established,
             incarnation: _incarnation,
-            recv_buf: BytesMut::new(),
+            recv_buf: BytesMut::with_capacity(2048),
         };
 
         Ok(Arc::new(Self {
@@ -173,10 +179,25 @@ impl Session {
         Ok(())
     }
 
+    /// Explicitly flush queued data. No-op for non-Established sessions.
+    pub fn flush(&self) -> Result<()> {
+        let mut inner = self.inner.lock().unwrap();
+        if matches!(inner.state, SessionState::Established) {
+            let now = current_ms();
+            inner.kcp.update(now)?;
+            inner.kcp.flush()?;
+        }
+        Ok(())
+    }
+
     /// Drive KCP update timer. Returns number of segments still in flight.
     /// Returns `DeadLink` if KCP has exhausted retransmissions.
+    /// No-op for non-Established sessions (returns 0).
     pub fn update(&self, current_ms: u32) -> Result<usize> {
         let mut inner = self.inner.lock().unwrap();
+        if !matches!(inner.state, SessionState::Established) {
+            return Ok(inner.kcp.wait_snd());
+        }
         if inner.kcp.is_dead_link() {
             return Err(Error::DeadLink);
         }
@@ -187,11 +208,13 @@ impl Session {
         Ok(inner.kcp.wait_snd())
     }
 
-    /// Feed incoming KCP data. Wakes reader afterwards.
+    /// Feed incoming KCP data. Wakes reader only if data becomes readable.
     pub fn input(&self, data: &[u8]) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
         inner.kcp.input(data)?;
-        self.waker.wake();
+        if inner.kcp.peeksize().is_ok() {
+            self.waker.wake();
+        }
         Ok(())
     }
 
@@ -208,6 +231,17 @@ impl Session {
             Err(kcp::Error::RecvQueueEmpty) => Ok(None),
             Err(e) => Err(Error::Kcp(e)),
         }
+    }
+
+    /// Drain all available messages into `out`, holding the lock for the entire drain.
+    pub fn try_recv_all(&self, out: &mut Vec<BytesMut>) -> Result<()> {
+        let mut inner = self.inner.lock().unwrap();
+        while let Ok(size) = inner.kcp.peeksize() {
+            let mut buf = BytesMut::zeroed(size);
+            inner.kcp.recv(&mut buf)?;
+            out.push(buf);
+        }
+        Ok(())
     }
 
     /// Peek at the next message size.
