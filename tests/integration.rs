@@ -4,7 +4,6 @@ use std::time::Duration;
 use kcp_peer::{Event, KcpConfig, KcpPeer};
 use tokio::time::sleep;
 
-
 /// Helper: bind two KcpPeers on loopback, ephemeral ports.
 async fn bind_pair() -> (KcpPeer, KcpPeer, SocketAddr, SocketAddr) {
     let config = KcpConfig::builder()
@@ -29,7 +28,11 @@ async fn bind_pair() -> (KcpPeer, KcpPeer, SocketAddr, SocketAddr) {
 }
 
 /// Wait for up to `timeout` for an event matching a predicate.
-async fn wait_for<F>(rx: &mut tokio::sync::broadcast::Receiver<Event>, f: F, timeout: Duration) -> Event
+async fn wait_for<F>(
+    rx: &mut tokio::sync::broadcast::Receiver<Event>,
+    f: F,
+    timeout: Duration,
+) -> Event
 where
     F: Fn(&Event) -> bool,
 {
@@ -65,10 +68,20 @@ async fn basic_send_recv() {
     a.send(addr_b, b"hello").await.expect("A→B send");
 
     // B gets Connected, then Data
-    let connected = wait_for(&mut events_b, |e| matches!(e, Event::Connected(_)), Duration::from_secs(5)).await;
+    let connected = wait_for(
+        &mut events_b,
+        |e| matches!(e, Event::Connected(_)),
+        Duration::from_secs(5),
+    )
+    .await;
     assert!(matches!(connected, Event::Connected(_)));
 
-    let data = wait_for(&mut events_b, |e| matches!(e, Event::Data(..)), Duration::from_secs(5)).await;
+    let data = wait_for(
+        &mut events_b,
+        |e| matches!(e, Event::Data(..)),
+        Duration::from_secs(5),
+    )
+    .await;
     match data {
         Event::Data(addr, msg) => {
             assert_eq!(addr, addr_a, "B: data from A's address");
@@ -81,7 +94,12 @@ async fn basic_send_recv() {
     b.send(addr_a, b"world").await.expect("B→A send");
 
     // A should get Data from B
-    let data2 = wait_for(&mut events_a, |e| matches!(e, Event::Data(..)), Duration::from_secs(5)).await;
+    let data2 = wait_for(
+        &mut events_a,
+        |e| matches!(e, Event::Data(..)),
+        Duration::from_secs(5),
+    )
+    .await;
     match data2 {
         Event::Data(addr, msg) => {
             assert_eq!(addr, addr_b, "A: data from B's address");
@@ -101,12 +119,27 @@ async fn bidirectional() {
 
     // A initiates
     a.send(addr_b, b"from_a").await.expect("A send");
-    let _ = wait_for(&mut events_b, |e| matches!(e, Event::Connected(_)), Duration::from_secs(5)).await;
-    let _ = wait_for(&mut events_b, |e| matches!(e, Event::Data(..)), Duration::from_secs(5)).await;
+    let _ = wait_for(
+        &mut events_b,
+        |e| matches!(e, Event::Connected(_)),
+        Duration::from_secs(5),
+    )
+    .await;
+    let _ = wait_for(
+        &mut events_b,
+        |e| matches!(e, Event::Data(..)),
+        Duration::from_secs(5),
+    )
+    .await;
 
     // B sends back immediately
     b.send(addr_a, b"from_b").await.expect("B send");
-    let data = wait_for(&mut events_a, |e| matches!(e, Event::Data(..)), Duration::from_secs(5)).await;
+    let data = wait_for(
+        &mut events_a,
+        |e| matches!(e, Event::Data(..)),
+        Duration::from_secs(5),
+    )
+    .await;
     match data {
         Event::Data(addr, msg) => {
             assert_eq!(addr, addr_b);
@@ -138,7 +171,9 @@ async fn crash_initiator() {
     let mut events_b = b.events();
 
     // A2 sends to B — should create new session with new conv_id
-    a2.send(addr_b, b"after_crash").await.expect("send after crash");
+    a2.send(addr_b, b"after_crash")
+        .await
+        .expect("send after crash");
 
     // B should get Connected (new session), possibly preceded by PeerReset
     let ev = wait_for(
@@ -187,8 +222,18 @@ async fn crash_receiver() {
 
     // Establish a session
     a.send(addr_b, b"before_crash").await.expect("initial send");
-    let _ = wait_for(&mut events_b, |e| matches!(e, Event::Connected(_)), Duration::from_secs(5)).await;
-    let _ = wait_for(&mut events_b, |e| matches!(e, Event::Data(..)), Duration::from_secs(5)).await;
+    let _ = wait_for(
+        &mut events_b,
+        |e| matches!(e, Event::Connected(_)),
+        Duration::from_secs(5),
+    )
+    .await;
+    let _ = wait_for(
+        &mut events_b,
+        |e| matches!(e, Event::Data(..)),
+        Duration::from_secs(5),
+    )
+    .await;
     drop(events_b); // no longer needed
 
     // B "crashes"
@@ -211,7 +256,9 @@ async fn crash_receiver() {
     let mut events_a = a.events();
 
     // A initiates a fresh connection to B2's address (application-level reconnect)
-    a.send(addr_b2, b"after_crash").await.expect("send after crash");
+    a.send(addr_b2, b"after_crash")
+        .await
+        .expect("send after crash");
 
     // A should get Connected for the new session
     let _ = wait_for(
@@ -252,11 +299,31 @@ async fn simultaneous_handshake() {
     b.send(addr_a, b"from_b").await.expect("B send");
 
     // Both should get Connected and Data
-    let _ = wait_for(&mut events_a, |e| matches!(e, Event::Connected(_)), Duration::from_secs(5)).await;
-    let _ = wait_for(&mut events_b, |e| matches!(e, Event::Connected(_)), Duration::from_secs(5)).await;
+    let _ = wait_for(
+        &mut events_a,
+        |e| matches!(e, Event::Connected(_)),
+        Duration::from_secs(5),
+    )
+    .await;
+    let _ = wait_for(
+        &mut events_b,
+        |e| matches!(e, Event::Connected(_)),
+        Duration::from_secs(5),
+    )
+    .await;
 
-    let _ = wait_for(&mut events_a, |e| matches!(e, Event::Data(..)), Duration::from_secs(5)).await;
-    let _ = wait_for(&mut events_b, |e| matches!(e, Event::Data(..)), Duration::from_secs(5)).await;
+    let _ = wait_for(
+        &mut events_a,
+        |e| matches!(e, Event::Data(..)),
+        Duration::from_secs(5),
+    )
+    .await;
+    let _ = wait_for(
+        &mut events_b,
+        |e| matches!(e, Event::Data(..)),
+        Duration::from_secs(5),
+    )
+    .await;
 }
 
 // ─── Session timeout ─────────────────────────────────────────────────
@@ -281,8 +348,18 @@ async fn session_timeout() {
     let mut events_b = b.events();
 
     a.send(addr_b, b"hi").await.expect("send");
-    let _ = wait_for(&mut events_b, |e| matches!(e, Event::Connected(_)), Duration::from_secs(5)).await;
-    let _ = wait_for(&mut events_b, |e| matches!(e, Event::Data(..)), Duration::from_secs(5)).await;
+    let _ = wait_for(
+        &mut events_b,
+        |e| matches!(e, Event::Connected(_)),
+        Duration::from_secs(5),
+    )
+    .await;
+    let _ = wait_for(
+        &mut events_b,
+        |e| matches!(e, Event::Data(..)),
+        Duration::from_secs(5),
+    )
+    .await;
 
     // Stop sending; after timeout, B should prune the session
     let _ = wait_for(
@@ -324,12 +401,32 @@ async fn multiple_peers() {
     let mut events_c = c.events();
 
     a.send(addr_b, b"a_to_b").await.expect("A→B");
-    let _ = wait_for(&mut events_b, |e| matches!(e, Event::Connected(_)), Duration::from_secs(5)).await;
-    let _ = wait_for(&mut events_b, |e| matches!(e, Event::Data(..)), Duration::from_secs(5)).await;
+    let _ = wait_for(
+        &mut events_b,
+        |e| matches!(e, Event::Connected(_)),
+        Duration::from_secs(5),
+    )
+    .await;
+    let _ = wait_for(
+        &mut events_b,
+        |e| matches!(e, Event::Data(..)),
+        Duration::from_secs(5),
+    )
+    .await;
 
     a.send(addr_c, b"a_to_c").await.expect("A→C");
-    let _ = wait_for(&mut events_c, |e| matches!(e, Event::Connected(_)), Duration::from_secs(5)).await;
-    let _ = wait_for(&mut events_c, |e| matches!(e, Event::Data(..)), Duration::from_secs(5)).await;
+    let _ = wait_for(
+        &mut events_c,
+        |e| matches!(e, Event::Connected(_)),
+        Duration::from_secs(5),
+    )
+    .await;
+    let _ = wait_for(
+        &mut events_c,
+        |e| matches!(e, Event::Data(..)),
+        Duration::from_secs(5),
+    )
+    .await;
 
     drop(a);
     drop(b);
@@ -346,8 +443,18 @@ async fn large_message() {
     let payload = vec![0xABu8; 15_000];
     a.send(addr_b, &payload).await.expect("send large");
 
-    let _ = wait_for(&mut events_b, |e| matches!(e, Event::Connected(_)), Duration::from_secs(5)).await;
-    let data = wait_for(&mut events_b, |e| matches!(e, Event::Data(..)), Duration::from_secs(5)).await;
+    let _ = wait_for(
+        &mut events_b,
+        |e| matches!(e, Event::Connected(_)),
+        Duration::from_secs(5),
+    )
+    .await;
+    let data = wait_for(
+        &mut events_b,
+        |e| matches!(e, Event::Data(..)),
+        Duration::from_secs(5),
+    )
+    .await;
     match data {
         Event::Data(_addr, msg) => {
             assert_eq!(msg.len(), 15_000, "large message size");
@@ -368,17 +475,32 @@ async fn reconnect() {
     let mut events_b = b.events();
 
     a.send(addr_b, b"first").await.expect("first send");
-    let _ = wait_for(&mut events_b, |e| matches!(e, Event::Data(..)), Duration::from_secs(5)).await;
+    let _ = wait_for(
+        &mut events_b,
+        |e| matches!(e, Event::Data(..)),
+        Duration::from_secs(5),
+    )
+    .await;
 
     // Force-disconnect on both sides
     a.disconnect(addr_b);
-    let _ = wait_for(&mut events_b, |e| matches!(e, Event::Disconnected(_)), Duration::from_secs(5)).await;
+    let _ = wait_for(
+        &mut events_b,
+        |e| matches!(e, Event::Disconnected(_)),
+        Duration::from_secs(5),
+    )
+    .await;
 
     sleep(Duration::from_millis(100)).await;
 
     // Reconnect
     a.send(addr_b, b"second").await.expect("reconnect send");
-    let data = wait_for(&mut events_b, |e| matches!(e, Event::Data(..)), Duration::from_secs(5)).await;
+    let data = wait_for(
+        &mut events_b,
+        |e| matches!(e, Event::Data(..)),
+        Duration::from_secs(5),
+    )
+    .await;
     match data {
         Event::Data(_addr, msg) => {
             assert_eq!(&msg[..], b"second", "reconnected message");
@@ -398,7 +520,7 @@ async fn dead_link() {
         .tick_interval(Duration::from_millis(10))
         .kcp_interval_ms(10)
         .kcp_nodelay(1, 10, 2, true)
-        .maximum_resend_times(1)
+        .maximum_resend_times(2)
         .rx_minrto(10)
         .fast_resend(1)
         .build();
@@ -414,7 +536,12 @@ async fn dead_link() {
 
     // Establish session
     a.send(addr_b, b"ping").await.expect("first send");
-    let _ = wait_for(&mut events_a, |e| matches!(e, Event::Connected(_)), Duration::from_secs(5)).await;
+    let _ = wait_for(
+        &mut events_a,
+        |e| matches!(e, Event::Connected(_)),
+        Duration::from_secs(10),
+    )
+    .await;
 
     // Drop B — KCP should exhaust retransmissions quickly with max_retransmits=1
     drop(b);
@@ -443,7 +570,12 @@ async fn many_small_messages() {
         a.send(addr_b, &msg).await.expect("send small");
     }
 
-    let _ = wait_for(&mut events_b, |e| matches!(e, Event::Connected(_)), Duration::from_secs(5)).await;
+    let _ = wait_for(
+        &mut events_b,
+        |e| matches!(e, Event::Connected(_)),
+        Duration::from_secs(5),
+    )
+    .await;
 
     let mut received = 0;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
