@@ -1,6 +1,6 @@
 use std::io::{self, Write};
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
@@ -54,7 +54,6 @@ pub struct SessionInner {
 pub enum SessionState {
     SynSent,
     Established,
-    Closing,
 }
 
 /// A peer session. Clone-friendly (Arc internals).
@@ -64,6 +63,9 @@ pub struct Session {
     pub closed: AtomicBool,
     pub last_rx: AtomicU64,
     pub peer_addr: SocketAddr,
+    pub socket: Arc<UdpSocket>,
+    pub syn_sent_at: AtomicU64,
+    pub syn_retries: AtomicU32,
 }
 
 impl std::fmt::Debug for Session {
@@ -99,6 +101,8 @@ impl Session {
             Err(e) => tracing::warn!("SYN send failed to {peer_addr}: {e}"),
         }
 
+        let now = epoch_ms();
+
         let inner = SessionInner {
             kcp,
             conv_id,
@@ -111,8 +115,11 @@ impl Session {
             inner: std::sync::Mutex::new(inner),
             waker: AtomicWaker::new(),
             closed: AtomicBool::new(false),
-            last_rx: AtomicU64::new(epoch_ms()),
+            last_rx: AtomicU64::new(now),
             peer_addr,
+            socket,
+            syn_sent_at: AtomicU64::new(now),
+            syn_retries: AtomicU32::new(0),
         }))
     }
 
@@ -151,6 +158,9 @@ impl Session {
             closed: AtomicBool::new(false),
             last_rx: AtomicU64::new(epoch_ms()),
             peer_addr,
+            socket,
+            syn_sent_at: AtomicU64::new(0),
+            syn_retries: AtomicU32::new(0),
         }))
     }
 
@@ -283,6 +293,46 @@ impl Session {
                 Ok(n)
             }
         }
+    }
+
+    /// Retransmit SYN if session is still in SynSent and retry interval has elapsed.
+    /// Returns `Ok(true)` if a retry was sent, `Ok(false)` if not yet time.
+    /// Returns `Err(Error::DeadLink)` when max retries exhausted.
+    pub fn maybe_retry_syn(&self, config: &crate::config::KcpConfig, now_ms: u32) -> Result<bool> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(Error::SessionClosed);
+        }
+
+        let conv_id = {
+            let inner = self.inner.lock().unwrap();
+            if !matches!(inner.state, SessionState::SynSent) {
+                return Ok(false);
+            }
+            inner.conv_id
+        };
+
+        let retries = self.syn_retries.load(Ordering::Acquire);
+        if retries >= config.syn_max_retries {
+            tracing::debug!("SYN retry exhausted for {}", self.peer_addr);
+            return Err(Error::DeadLink);
+        }
+
+        let last_sent = self.syn_sent_at.load(Ordering::Acquire);
+        let elapsed = (now_ms as u64).saturating_sub(last_sent);
+        if elapsed < (config.syn_retry_interval.as_millis() as u64) << retries {
+            return Ok(false);
+        }
+
+        let syn = packet::encode_control(PacketType::Syn, conv_id);
+        let _ = self.socket.try_send_to(&syn, self.peer_addr);
+
+        let now = epoch_ms();
+        self.syn_sent_at.store(now, Ordering::Release);
+        self.syn_retries.fetch_add(1, Ordering::Release);
+
+        tracing::trace!("SYN retry {} sent to {}", retries + 1, self.peer_addr);
+
+        Ok(true)
     }
 }
 

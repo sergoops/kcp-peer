@@ -34,6 +34,10 @@ pub struct KcpConfig {
     /// If subscribers are slower than the event rate, old events are dropped.
     /// Check [`Event::EventChannelLagged`](crate::Error::EventChannelLagged).
     pub event_channel_capacity: usize,
+    /// How long to wait before retransmitting a SYN (handshake initiation) packet.
+    pub syn_retry_interval: Duration,
+    /// Maximum number of SYN retransmissions before declaring DeadLink.
+    pub syn_max_retries: u32,
 }
 
 impl Default for KcpConfig {
@@ -49,6 +53,8 @@ impl Default for KcpConfig {
             tick_interval: Duration::from_millis(10),
             session_timeout: Duration::from_secs(60),
             event_channel_capacity: 1024,
+            syn_retry_interval: Duration::from_millis(150),
+            syn_max_retries: 5,
         }
     }
 }
@@ -123,6 +129,16 @@ impl KcpConfigBuilder {
 
     pub fn event_channel_capacity(mut self, v: usize) -> Self {
         self.0.event_channel_capacity = v;
+        self
+    }
+
+    pub fn syn_retry_interval(mut self, v: Duration) -> Self {
+        self.0.syn_retry_interval = v;
+        self
+    }
+
+    pub fn syn_max_retries(mut self, v: u32) -> Self {
+        self.0.syn_max_retries = v;
         self
     }
 

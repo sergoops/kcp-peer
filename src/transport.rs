@@ -136,6 +136,7 @@ impl KcpPeer {
             sessions.clone(),
             event_tx.clone(),
             config.clone(),
+            socket.clone(),
             shutdown.clone(),
         );
 
@@ -287,9 +288,10 @@ impl KcpPeer {
 
     /// Gracefully shut down, sending RESET to all peers.
     ///
-    /// Cancels background tasks, sends a RESET packet to each active peer,
-    /// and awaits task completion. On drop (without calling `shutdown`),
-    /// tasks are cancelled but no RESET packets are sent.
+    /// Cancels background tasks, sends RESET packets (3 copies each) to every
+    /// active peer to maximise delivery probability, and awaits task completion.
+    /// On drop (without calling `shutdown`), tasks are cancelled but no RESET
+    /// packets are sent.
     ///
     /// # Cancel safety
     ///
@@ -299,13 +301,15 @@ impl KcpPeer {
     /// cancelled). Takes `self` so it can only be called once.
     pub async fn shutdown(mut self) {
         self.shutdown.cancel();
-        // send RESET to all active sessions
+        // send RESET to all active sessions (3 copies for reliability)
         let peers: Vec<Arc<Session>> = self.sessions.read().unwrap().values().cloned().collect();
         for s in &peers {
             s.mark_closed();
             let conv_id = s.inner.lock().unwrap().conv_id;
             let reset = packet::encode_control(PacketType::Reset, conv_id);
-            let _ = self.socket.try_send_to(&reset, s.peer_addr);
+            for _ in 0..3 {
+                let _ = self.socket.try_send_to(&reset, s.peer_addr);
+            }
         }
         if let Some(h) = self._recv_handle.take() {
             h.await.ok();
@@ -377,11 +381,12 @@ fn spawn_receive_task(
     })
 }
 
-/// Spawn the update task: drives KCP updates and prunes stale sessions.
+/// Spawn the update task: drives KCP updates, retries SYN, and prunes stale sessions.
 fn spawn_update_task(
     sessions: Arc<std::sync::RwLock<HashMap<CanonicalAddr, Arc<Session>>>>,
     event_tx: broadcast::Sender<Event>,
     config: Arc<KcpConfig>,
+    socket: Arc<UdpSocket>,
     shutdown: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -416,6 +421,16 @@ fn spawn_update_task(
                                 Ok(_) => {}
                             }
 
+                            // SYN retry for handshake-in-progress sessions
+                            match sess.maybe_retry_syn(&config, now_ms) {
+                                Err(crate::error::Error::DeadLink) => {
+                                    to_remove.push(*can);
+                                    continue;
+                                }
+                                Err(_) => {}
+                                Ok(_) => {}
+                            }
+
                             // session timeout check
                             let last_rx_ms = sess.last_rx.load(Ordering::Acquire);
                             if last_rx_ms > 0 {
@@ -429,6 +444,12 @@ fn spawn_update_task(
 
                     for can in to_remove {
                         if let Some(sess) = sessions.write().unwrap().remove(&can) {
+                            // Send RESET to notify peer the session is gone
+                            let conv_id = sess.inner.lock().unwrap().conv_id;
+                            let reset = packet::encode_control(PacketType::Reset, conv_id);
+                            for _ in 0..3 {
+                                let _ = socket.try_send_to(&reset, sess.peer_addr);
+                            }
                             sess.mark_closed();
                             let _ = event_tx.send(Event::Disconnected(sess.peer_addr));
                         }
@@ -477,13 +498,15 @@ async fn handle_incoming(
                     }
                 }
                 None => {
-                    // Unknown session: send RESET
+                    // Unknown session: send RESET (3 copies for reliability)
                     if payload.len() >= 4 {
                         let mut conv_bytes = [0u8; 4];
                         conv_bytes.copy_from_slice(&payload[..4]);
                         let conv = u32::from_le_bytes(conv_bytes);
                         let reset = packet::encode_control(PacketType::Reset, conv);
-                        let _ = socket.try_send_to(&reset, from);
+                        for _ in 0..3 {
+                            let _ = socket.try_send_to(&reset, from);
+                        }
                     }
                 }
             }
@@ -521,6 +544,11 @@ async fn handle_incoming(
                         let mut inner = session.inner.lock().unwrap();
                         let old_conv = inner.conv_id;
                         if old_conv == conv {
+                            if matches!(inner.state, SessionState::Established) {
+                                // SYN_ACK may have been lost — re-acknowledge
+                                send_ack_to = Some(from);
+                                ack_conv = conv;
+                            }
                             SynAction::Ignore
                         } else if matches!(inner.state, SessionState::SynSent) {
                             // Simultaneous handshake — tie-break by address.
