@@ -207,7 +207,7 @@ impl KcpPeer {
 
     /// Initiate a session to a peer (handshake).
     async fn initiate_session(&self, peer: SocketAddr) -> Result<Arc<Session>> {
-        let conv_id = rand::rng().random::<u32>();
+        let conv_id = rand::rng().random_range(1..=u32::MAX);
 
         let session = Session::new_outbound(
             conv_id,
