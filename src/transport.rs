@@ -218,6 +218,15 @@ impl KcpPeer {
     /// the handshake with exponential backoff (see
     /// [`syn_retry_interval`](crate::KcpConfig::syn_retry_interval)).
     ///
+    /// # Buffered data on handshake failure
+    ///
+    /// Data queued during [`SynSent`](crate::session::SessionState::SynSent) is
+    /// **dropped silently** if the handshake eventually fails (SYN retries
+    /// exhausted). [`send()`](KcpPeer::send) returned `Ok(())`, but the data
+    /// never hit the wire. To detect this, monitor [`events()`](KcpPeer::events)
+    /// for [`Event::Disconnected`](Event::Disconnected) and re-send important
+    /// data after the next [`Event::Connected`](Event::Connected).
+    ///
     /// # Errors
     ///
     /// Returns [`DeadLink`](crate::Error::DeadLink) if the session's KCP
@@ -254,7 +263,15 @@ impl KcpPeer {
     ///
     /// Idempotent — returns the existing `KcpConnection` if the session already exists.
     /// Never fails: even if the SYN send fails, the session is created and
-    /// the background update task will retry the handshake.
+    /// the background update task will retry the handshake with exponential backoff.
+    ///
+    /// **Non-blocking:** the handshake proceeds asynchronously — this method sends
+    /// the SYN and returns immediately. The returned [`KcpConnection`](crate::KcpConnection)
+    /// is usable right away; data written to it before the handshake completes is
+    /// buffered and flushed automatically once the session is established.
+    /// Subscribe to [`events()`](KcpPeer::events) and wait for
+    /// [`Event::Connected`](Event::Connected) to be notified when the session
+    /// is ready for data transfer.
     ///
     /// The returned handle implements [`AsyncRead`](tokio::io::AsyncRead) +
     /// [`AsyncWrite`](tokio::io::AsyncWrite) for use with tokio framing utilities

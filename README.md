@@ -152,6 +152,16 @@ Initiator                    Receiver
 
 Auto-initiate: when `send()` is called for an unknown address, a new session is created in `SynSent` state and a SYN is sent. The handshake completes asynchronously; queued data is flushed once the session transitions to `Established`.
 
+**Non-blocking semantics:** both `connect()` and `send()` return immediately
+after dispatching the SYN — they never wait for the handshake to complete.
+Data sent during `SynSent` is buffered in KCP and transmitted automatically
+once the session reaches `Established`.
+
+**Buffered data on failure:** if the handshake fails (SYN retries exhausted),
+any data that was queued during `SynSent` is dropped silently. The caller is
+notified via `Event::Disconnected`. On receiving this event, re-send important
+data after the next `Event::Connected`.
+
 **SYN retransmission:** if no `SYN_ACK` arrives, the background update task retransmits the SYN with exponential backoff (base [`syn_retry_interval`](#configuration-reference), doubled each attempt). After [`syn_max_retries`](#configuration-reference) the session is abandoned and `Disconnected` fires.
 
 **SYN_ACK re-send:** if the receiver gets a duplicate SYN for an already-established session (the original SYN_ACK was lost), it re-sends the SYN_ACK.
