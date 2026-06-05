@@ -58,8 +58,6 @@ where
     }
 }
 
-// ─── Basic send/recv ─────────────────────────────────────────────────
-
 #[tokio::test]
 async fn basic_send_recv() {
     let (a, b, addr_a, addr_b) = bind_pair().await;
@@ -111,8 +109,6 @@ async fn basic_send_recv() {
     }
 }
 
-// ─── Bidirectional exchange ──────────────────────────────────────────
-
 #[tokio::test]
 async fn bidirectional() {
     let (a, b, addr_a, addr_b) = bind_pair().await;
@@ -150,8 +146,6 @@ async fn bidirectional() {
         _ => unreachable!(),
     }
 }
-
-// ─── Crash: initiator restarts ───────────────────────────────────────
 
 #[tokio::test]
 async fn crash_initiator() {
@@ -248,8 +242,6 @@ async fn crash_initiator() {
     drop(b);
 }
 
-// ─── Crash: receiver restarts ────────────────────────────────────────
-
 #[tokio::test]
 async fn crash_receiver() {
     let (a, b, _addr_a, addr_b) = bind_pair().await;
@@ -321,7 +313,6 @@ async fn crash_receiver() {
     drop(b2);
 }
 
-// ─── PeerReset delivery: receiver detects initiator crash ──────────────
 // A receives PeerReset when B crashes, restarts on the same address, and
 // B2 initiates a new connection. A detects the restart via SYN from a
 // previously-Established address with a different incarnation.
@@ -453,8 +444,6 @@ async fn peer_reset_detection() {
     drop(b2);
 }
 
-// ─── Simultaneous handshake ──────────────────────────────────────────
-
 #[tokio::test]
 async fn simultaneous_handshake() {
     let (a, b, addr_a, addr_b) = bind_pair().await;
@@ -492,8 +481,6 @@ async fn simultaneous_handshake() {
     )
     .await;
 }
-
-// ─── Session timeout ─────────────────────────────────────────────────
 
 #[tokio::test]
 async fn session_timeout() {
@@ -539,8 +526,6 @@ async fn session_timeout() {
     drop(a);
     drop(b);
 }
-
-// ─── Multiple peers ──────────────────────────────────────────────────
 
 #[tokio::test]
 async fn multiple_peers() {
@@ -600,8 +585,6 @@ async fn multiple_peers() {
     drop(c);
 }
 
-// ─── Large message (KCP segmentation) ──────────────────────────────────
-
 #[tokio::test]
 async fn large_message() {
     let (a, b, _addr_a, addr_b) = bind_pair().await;
@@ -633,8 +616,6 @@ async fn large_message() {
     drop(a);
     drop(b);
 }
-
-// ─── Reconnect after disconnect ───────────────────────────────────────
 
 #[tokio::test]
 async fn reconnect() {
@@ -678,8 +659,6 @@ async fn reconnect() {
     drop(a);
     drop(b);
 }
-
-// ─── Dead link detection ──────────────────────────────────────────────
 
 #[tokio::test]
 async fn dead_link() {
@@ -727,8 +706,6 @@ async fn dead_link() {
 
     drop(a);
 }
-
-// ─── Many small messages ──────────────────────────────────────────────
 
 #[tokio::test]
 async fn many_small_messages() {

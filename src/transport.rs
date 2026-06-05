@@ -249,8 +249,6 @@ pub struct PeerStats {
     pub elapsed: Duration,
 }
 
-// ─── Background Tasks ────────────────────────────────────────────────
-
 /// Spawn the receive task: reads UDP packets and dispatches to sessions.
 fn spawn_receive_task(
     socket: Arc<UdpSocket>,
@@ -533,8 +531,6 @@ async fn handle_incoming(
 
     Ok(())
 }
-
-// ─── Address Canonicalization ────────────────────────────────────────
 
 /// Normalize IPv4-mapped IPv6 addresses to plain IPv4.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
