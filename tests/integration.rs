@@ -153,29 +153,62 @@ async fn bidirectional() {
 
 #[tokio::test]
 async fn crash_initiator() {
-    let (a, b, _addr_a, addr_b) = bind_pair().await;
-    drop(a); // A "crashes"
-    sleep(Duration::from_millis(100)).await;
-
     let config = KcpConfig::builder()
         .tick_interval(Duration::from_millis(10))
+        .session_timeout(Duration::from_secs(60))
         .kcp_nodelay(2, 10, 2, true)
         .rx_minrto(10)
         .fast_resend(1)
         .build();
 
-    // New A (same or new address — but B identifies by addr, so use a new port)
-    let a2 = KcpPeer::bind_with("127.0.0.1:0", config)
+    // A binds to a fixed port so we can rebind the same address after crash
+    let a = KcpPeer::bind_with("127.0.0.1:9870", config.clone())
         .await
-        .expect("rebind A");
+        .expect("bind A");
+    let b = KcpPeer::bind_with("127.0.0.1:0", config)
+        .await
+        .expect("bind B");
+    let addr_a = a.local_addr();
+    let addr_b = b.local_addr();
     let mut events_b = b.events();
 
-    // A2 sends to B — should create new session with new conv_id
+    // 1. A sends data, B establishes session with A
+    a.send(addr_b, b"before_crash").await.expect("A send");
+    let _ = wait_for(
+        &mut events_b,
+        |e| matches!(e, Event::Connected(_)),
+        Duration::from_secs(5),
+    )
+    .await;
+    let _ = wait_for(
+        &mut events_b,
+        |e| matches!(e, Event::Data(..)),
+        Duration::from_secs(5),
+    )
+    .await;
+
+    // 2. A crashes (Drop closes socket + cancels bg tasks)
+    drop(a);
+    sleep(Duration::from_millis(100)).await;
+
+    // 3. A2 rebinds the same address (same port as original A)
+    let config2 = KcpConfig::builder()
+        .tick_interval(Duration::from_millis(10))
+        .session_timeout(Duration::from_secs(60))
+        .kcp_nodelay(2, 10, 2, true)
+        .rx_minrto(10)
+        .fast_resend(1)
+        .build();
+    let a2 = KcpPeer::bind_with(addr_a, config2)
+        .await
+        .expect("rebind A on same address");
+
+    // 4. A2 sends to B — B sees same source address but new incarnation + conv_id
     a2.send(addr_b, b"after_crash")
         .await
         .expect("send after crash");
 
-    // B should get Connected (new session), possibly preceded by PeerReset
+    // 5. B detects the old session is dead (PeerReset) and new session arrives (Connected)
     let ev = wait_for(
         &mut events_b,
         |e| matches!(e, Event::PeerReset(_) | Event::Connected(_)),
@@ -195,7 +228,7 @@ async fn crash_initiator() {
         _ => unreachable!(),
     }
 
-    // Data arrives at B
+    // 6. Data arrives at B
     let data_ev = wait_for(
         &mut events_b,
         |e| matches!(e, Event::Data(..)),
@@ -203,8 +236,9 @@ async fn crash_initiator() {
     )
     .await;
     match data_ev {
-        Event::Data(_addr, msg) => {
-            assert_eq!(&msg[..], b"after_crash", "B received message from new A");
+        Event::Data(addr, msg) => {
+            assert_eq!(addr, addr_a, "B: data from A's original address");
+            assert_eq!(&msg[..], b"after_crash");
         }
         _ => unreachable!(),
     }
