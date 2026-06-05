@@ -91,7 +91,8 @@ impl KcpConfig {
         kcp.set_fast_resend(self.fast_resend);
         kcp.set_maximum_resend_times(self.maximum_resend_times);
         kcp.set_interval(self.kcp_interval_ms);
-        kcp.set_mtu(self.mtu as usize).unwrap();
+        let mtu = std::cmp::max(self.mtu, 50) as usize;
+        kcp.set_mtu(mtu).ok();
     }
 
     /// Create a builder.
@@ -171,6 +172,9 @@ impl KcpConfigBuilder {
     }
 
     pub fn build(self) -> KcpConfig {
-        self.0
+        KcpConfig {
+            mtu: std::cmp::max(self.0.mtu, 50),
+            ..self.0
+        }
     }
 }

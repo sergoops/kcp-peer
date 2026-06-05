@@ -128,12 +128,15 @@ impl std::fmt::Debug for Session {
 }
 
 impl Session {
-    /// Create a new outbound (initiator) session. Sends SYN.
-    pub async fn new_outbound(
+    /// Create a new outbound (initiator) session without sending SYN.
+    /// The caller must send SYN separately via [`Self::send_syn`] after the
+    /// session is registered in the peer map — this guarantees only one SYN
+    /// is sent per peer.
+    pub fn new_outbound(
         conv_id: u32,
         peer_addr: SocketAddr,
         socket: Arc<UdpSocket>,
-        _incarnation: u64,
+        incarnation: u64,
         config: &KcpConfig,
     ) -> Arc<Self> {
         let output = DirectOutput {
@@ -144,19 +147,13 @@ impl Session {
         let mut kcp = Kcp::new(conv_id, output);
         config.apply_to(&mut kcp);
 
-        let syn = packet::encode_control(PacketType::Syn, conv_id);
-        match socket.send_to(&syn, peer_addr).await {
-            Ok(n) => tracing::trace!("SYN sent {n} bytes to {peer_addr}"),
-            Err(e) => tracing::warn!("SYN send failed to {peer_addr}: {e}"),
-        }
-
         let now = epoch_ms();
 
         let inner = SessionInner {
             kcp,
             conv_id,
             state: SessionState::SynSent,
-            incarnation: _incarnation,
+            incarnation,
         };
 
         Arc::new(Self {
@@ -168,6 +165,20 @@ impl Session {
             syn_sent_at: AtomicU64::new(now),
             syn_retries: AtomicU32::new(0),
         })
+    }
+
+    /// Send a SYN packet for this outbound session.
+    /// Called after the session is inserted into the peer map.
+    pub(crate) async fn send_syn(&self) {
+        let conv_id = self.inner.lock().unwrap().conv_id;
+        let syn = packet::encode_control(PacketType::Syn, conv_id);
+        let now = epoch_ms();
+        self.syn_sent_at.store(now, Ordering::Release);
+        if let Err(e) = self.socket.send_to(&syn, self.peer_addr).await {
+            tracing::warn!("SYN send failed to {}: {e}", self.peer_addr);
+        } else {
+            tracing::trace!("SYN sent to {}", self.peer_addr);
+        }
     }
 
     /// Create a new inbound (receiver) session after receiving SYN.
@@ -221,14 +232,14 @@ impl Session {
             return Err(Error::SessionClosed);
         }
         let mut inner = self.inner.lock().unwrap();
+        if inner.kcp.is_dead_link() {
+            return Err(Error::DeadLink);
+        }
         inner.kcp.send(data)?;
         if matches!(inner.state, SessionState::Established) {
             let now = current_ms();
             inner.kcp.update(now)?;
             inner.kcp.flush()?;
-        }
-        if inner.kcp.is_dead_link() {
-            return Err(Error::DeadLink);
         }
         Ok(())
     }
@@ -272,7 +283,7 @@ impl Session {
     /// Retransmit SYN if session is still in SynSent and retry interval has elapsed.
     /// Returns `Ok(true)` if a retry was sent, `Ok(false)` if not yet time.
     /// Returns `Err(Error::DeadLink)` when max retries exhausted.
-    pub fn maybe_retry_syn(&self, config: &crate::config::KcpConfig, now_ms: u32) -> Result<bool> {
+    pub fn maybe_retry_syn(&self, config: &crate::config::KcpConfig, now_epoch: u64) -> Result<bool> {
         if self.closed.load(Ordering::Acquire) {
             return Err(Error::SessionClosed);
         }
@@ -292,7 +303,7 @@ impl Session {
         }
 
         let last_sent = self.syn_sent_at.load(Ordering::Acquire);
-        let elapsed = (now_ms as u64).saturating_sub(last_sent);
+        let elapsed = now_epoch.saturating_sub(last_sent);
         if elapsed < (config.syn_retry_interval.as_millis() as u64) << retries {
             return Ok(false);
         }

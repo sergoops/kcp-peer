@@ -748,3 +748,43 @@ async fn many_small_messages() {
     drop(a);
     drop(b);
 }
+
+#[tokio::test]
+async fn concurrent_send_to_unknown_peer() {
+    let (a, b, _addr_a, addr_b) = bind_pair().await;
+    let mut events_b = b.events();
+
+    // Both futures run concurrently to trigger the race: two `send()` calls
+    // for the same unknown peer at the same time.
+    let s1 = a.send(addr_b, b"msg1");
+    let s2 = a.send(addr_b, b"msg2");
+    let (r1, r2) = tokio::join!(s1, s2);
+    r1.expect("send1");
+    r2.expect("send2");
+
+    let _ = wait_for(
+        &mut events_b,
+        |e| matches!(e, Event::Connected(_)),
+        Duration::from_secs(5),
+    )
+    .await;
+
+    let mut received = Vec::new();
+    for _ in 0..2 {
+        let data = wait_for(
+            &mut events_b,
+            |e| matches!(e, Event::Data(..)),
+            Duration::from_secs(5),
+        )
+        .await;
+        match data {
+            Event::Data(_, msg) => received.push(msg.to_vec()),
+            _ => unreachable!(),
+        }
+    }
+    received.sort();
+    assert_eq!(received, vec![b"msg1".to_vec(), b"msg2".to_vec()]);
+
+    drop(a);
+    drop(b);
+}

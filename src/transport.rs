@@ -236,8 +236,9 @@ impl KcpPeer {
     ///
     /// # Cancel safety
     ///
-    /// Cancel-safe. If cancelled during handshake initiation, no session is
-    /// created (the future is dropped before the session map is modified).
+    /// Cancel-safe. If cancelled during handshake initiation, no session entry
+    /// is left in the session map. A SYN may have been sent, but the peer will
+    /// time out the orphaned session — no persistent state leaks.
     /// Safe to use inside `tokio::select!`.
     pub async fn send(&self, peer: SocketAddr, data: &[u8]) -> Result<()> {
         let can = canonicalize(peer);
@@ -258,6 +259,14 @@ impl KcpPeer {
 
     /// Initiate a session to a peer (handshake).
     async fn initiate_session(&self, peer: SocketAddr) -> Arc<Session> {
+        let can = canonicalize(peer);
+
+        // Fast check under read lock — avoids creating a session if another
+        // task already inserted one for this peer while we were awaiting.
+        if let Some(existing) = self.sessions.read().unwrap().get(&can).cloned() {
+            return existing;
+        }
+
         let conv_id = rand::rng().random_range(1..=u32::MAX);
 
         let session = Session::new_outbound(
@@ -266,14 +275,22 @@ impl KcpPeer {
             self.socket.clone(),
             self.incarnation,
             self.config.as_ref(),
-        )
-        .await;
+        );
 
-        let can = canonicalize(peer);
         {
             let mut map = self.sessions.write().unwrap();
+            // Double-check: another task may have inserted since we last checked.
+            // If so, discard our session (no SYN was sent yet).
+            if let Some(existing) = map.get(&can) {
+                return existing.clone();
+            }
             map.insert(can, session.clone());
         }
+
+        // SYN is sent only after map insertion — guarantees at most one SYN
+        // per peer, so the receiver never sees a spurious second SYN that
+        // would trigger crash recovery and destroy the session.
+        session.send_syn().await;
 
         session
     }
@@ -478,7 +495,7 @@ fn spawn_update_task(
                             }
 
                             // SYN retry for handshake-in-progress sessions
-                            match sess.maybe_retry_syn(&config, now_ms) {
+                            match sess.maybe_retry_syn(&config, now_epoch) {
                                 Err(crate::error::Error::DeadLink) => {
                                     to_remove.push(*can);
                                     continue;
