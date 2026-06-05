@@ -43,8 +43,7 @@ async fn main() {
 
         let mut conn = client
             .connect(SERVER_ADDR.parse().unwrap())
-            .await
-            .expect("connect");
+            .await;
 
         conn.write_all(payload).await.expect("write");
         conn.flush().await.expect("flush");

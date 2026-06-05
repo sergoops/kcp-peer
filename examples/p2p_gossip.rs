@@ -26,8 +26,7 @@ async fn main() {
     for &port in &PORTS[1..] {
         let mut conn = node0
             .connect(format!("127.0.0.1:{port}").parse().unwrap())
-            .await
-            .expect("connect");
+            .await;
         let msg = format!("hello from node 0 to node {port}");
         conn.write_all(msg.as_bytes()).await.unwrap();
         conn.flush().await.unwrap();

@@ -41,8 +41,7 @@ async fn main() {
 
     let mut conn = client
         .connect("127.0.0.1:9877".parse().unwrap())
-        .await
-        .expect("connect");
+        .await;
 
     for msg in &["hello", "world", "from", "client"] {
         conn.write_all(msg.as_bytes()).await.unwrap();

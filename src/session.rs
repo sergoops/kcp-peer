@@ -86,7 +86,7 @@ impl Session {
         socket: Arc<UdpSocket>,
         _incarnation: u64,
         config: &KcpConfig,
-    ) -> Result<Arc<Self>> {
+    ) -> Arc<Self> {
         let output = DirectOutput {
             socket: socket.clone(),
             peer: peer_addr,
@@ -111,7 +111,7 @@ impl Session {
             recv_buf: BytesMut::with_capacity(2048),
         };
 
-        Ok(Arc::new(Self {
+        Arc::new(Self {
             inner: std::sync::Mutex::new(inner),
             waker: AtomicWaker::new(),
             closed: AtomicBool::new(false),
@@ -120,7 +120,7 @@ impl Session {
             socket,
             syn_sent_at: AtomicU64::new(now),
             syn_retries: AtomicU32::new(0),
-        }))
+        })
     }
 
     /// Create a new inbound (receiver) session after receiving SYN.
@@ -130,7 +130,7 @@ impl Session {
         socket: Arc<UdpSocket>,
         _incarnation: u64,
         config: &KcpConfig,
-    ) -> Result<Arc<Self>> {
+    ) -> Arc<Self> {
         let output = DirectOutput {
             socket: socket.clone(),
             peer: peer_addr,
@@ -152,7 +152,7 @@ impl Session {
             recv_buf: BytesMut::with_capacity(2048),
         };
 
-        Ok(Arc::new(Self {
+        Arc::new(Self {
             inner: std::sync::Mutex::new(inner),
             waker: AtomicWaker::new(),
             closed: AtomicBool::new(false),
@@ -161,7 +161,7 @@ impl Session {
             socket,
             syn_sent_at: AtomicU64::new(0),
             syn_retries: AtomicU32::new(0),
-        }))
+        })
     }
 
     /// Mark session as closed and wake any blocked reader.

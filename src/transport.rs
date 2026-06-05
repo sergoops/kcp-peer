@@ -179,7 +179,7 @@ impl KcpPeer {
         match session {
             Some(s) => s.send_data(data),
             None => {
-                let session = self.initiate_session(peer).await?;
+                let session = self.initiate_session(peer).await;
                 session.send_data(data)
             }
         }
@@ -194,20 +194,20 @@ impl KcpPeer {
     ///
     /// Cancel-safe. Same semantics as [`send`](KcpPeer::send) — no partial state
     /// is left behind if the future is dropped mid-flight.
-    pub async fn connect(&self, peer: SocketAddr) -> Result<KcpConnection> {
+    pub async fn connect(&self, peer: SocketAddr) -> KcpConnection {
         let can = canonicalize(peer);
 
         // fast path: existing session
         if let Some(s) = self.sessions.read().unwrap().get(&can) {
-            return Ok(KcpConnection::new(s.clone()));
+            return KcpConnection::new(s.clone());
         }
 
-        let session = self.initiate_session(peer).await?;
-        Ok(KcpConnection::new(session))
+        let session = self.initiate_session(peer).await;
+        KcpConnection::new(session)
     }
 
     /// Initiate a session to a peer (handshake).
-    async fn initiate_session(&self, peer: SocketAddr) -> Result<Arc<Session>> {
+    async fn initiate_session(&self, peer: SocketAddr) -> Arc<Session> {
         let conv_id = rand::rng().random_range(1..=u32::MAX);
 
         let session = Session::new_outbound(
@@ -217,7 +217,7 @@ impl KcpPeer {
             self.incarnation,
             self.config.as_ref(),
         )
-        .await?;
+        .await;
 
         let can = canonicalize(peer);
         {
@@ -225,7 +225,7 @@ impl KcpPeer {
             map.insert(can, session.clone());
         }
 
-        Ok(session)
+        session
     }
 
     /// Subscribe to transport events.
@@ -599,7 +599,7 @@ async fn handle_incoming(
                 SynAction::CreateNew => {
                     let session =
                         Session::new_inbound(conv, from, socket.clone(), incarnation, config)
-                            .await?;
+                            .await;
                     let mut map = sessions.write().unwrap();
                     map.insert(can, session.clone());
                     let _ = event_tx.send(Event::Connected(from));
