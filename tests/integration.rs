@@ -4,8 +4,6 @@ use std::time::Duration;
 use kcp_peer::{Event, KcpConfig, KcpPeer};
 use tokio::time::sleep;
 
-
-
 /// Helper: bind two KcpPeers on loopback, ephemeral ports.
 async fn bind_pair() -> (KcpPeer, KcpPeer, SocketAddr, SocketAddr) {
     let config = KcpConfig::builder()
@@ -403,9 +401,7 @@ async fn peer_restarted_detection() {
         .expect("rebind B on same address");
 
     // 4. B2 initiates to A — SYN from an address A already has an Established session for
-    b2.send(addr_a, b"after_restart")
-        .await
-        .expect("B2 send");
+    b2.send(addr_a, b"after_restart").await.expect("B2 send");
 
     // 5. A detects crash: old Established session for B's address → PeerRestarted
     let peer_restarted = wait_for(
