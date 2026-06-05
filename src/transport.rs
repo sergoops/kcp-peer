@@ -344,14 +344,21 @@ impl KcpPeer {
 
     /// Force close a session with a peer.
     ///
-    /// Removes the local session and fires [`Event::Disconnected`].
-    /// Unlike [`shutdown()`](KcpPeer::shutdown), no `RESET` packet is sent
-    /// to the remote side — the remote will discover the disconnection
-    /// only when its session times out.
+    /// Removes the local session, sends a `RESET` packet (3 copies for reliability)
+    /// to the remote peer, and fires [`Event::Disconnected`].
+    /// After calling this, the remote peer's session is closed immediately.
+    ///
+    /// Unlike [`shutdown()`](KcpPeer::shutdown), this operates on a single peer
+    /// and does not affect background tasks.
     pub fn disconnect(&self, peer: SocketAddr) {
         let can = canonicalize(peer);
         if let Some(s) = self.sessions.write().unwrap().remove(&can) {
             s.mark_closed();
+            let conv_id = s.inner.lock().unwrap().conv_id;
+            let reset = packet::encode_control(PacketType::Reset, conv_id);
+            for _ in 0..3 {
+                let _ = self.socket.try_send_to(&reset, peer);
+            }
             let _ = self.event_tx.send(Event::Disconnected(peer));
         }
     }
@@ -363,8 +370,8 @@ impl KcpPeer {
     /// 3. Waits for the receive and update tasks to exit.
     ///
     /// On drop (without calling [`shutdown()`](KcpPeer::shutdown)), background
-    /// tasks are cancelled but **no `RESET` packets are sent** — remote peers
-    /// will discover the disconnection only when their session timers expire.
+    /// tasks are cancelled and no `RESET` is sent — remote peers
+    /// discover the disconnection only when their session timers expire.
     ///
     /// # Cancel safety
     ///
