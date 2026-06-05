@@ -8,15 +8,29 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use crate::error::Error;
 use crate::session::Session;
 
-/// A handle to a single peer session implementing `AsyncRead` + `AsyncWrite`.
+/// A handle to a single peer session implementing [`AsyncRead`](tokio::io::AsyncRead) +
+/// [`AsyncWrite`](tokio::io::AsyncWrite).
 ///
 /// Obtained via [`KcpPeer::connect`](crate::KcpPeer::connect). Composes with tokio framing
 /// utilities such as `Framed`, `LengthDelimitedCodec`, etc.
 ///
-/// # Note
-/// When event subscribers exist on the [`KcpPeer`](crate::KcpPeer), incoming data is drained
-/// into [`Event::Data`](crate::Event::Data) and `poll_read` returns `Pending`.
-/// To read via `KcpConnection`, avoid subscribing to events, or read data from events instead.
+/// # Interaction with events
+///
+/// When event subscribers exist on the [`KcpPeer`](crate::KcpPeer) (via
+/// [`events()`](crate::KcpPeer::events)), incoming data is drained into
+/// [`Event::Data`](crate::Event::Data) and `poll_read` returns [`Pending`](std::task::Poll::Pending).
+/// To read via `KcpConnection`, either:
+/// * Avoid subscribing to events, or
+/// * Read data from [`Event::Data`](crate::Event::Data) instead of using `poll_read`.
+///
+/// # Lifecycle
+///
+/// The [`KcpConnection`](KcpConnection) remains valid until the session is
+/// removed (timeout, DeadLink, RESET, or [`disconnect()`](crate::KcpPeer::disconnect)).
+/// After removal, [`poll_read`](tokio::io::AsyncRead::poll_read) returns
+/// `Err(ConnectionReset)` and [`poll_write`](tokio::io::AsyncWrite::poll_write)
+/// returns `Err(ConnectionReset)`. The handle should be discarded and a new one
+/// obtained via [`connect()`](crate::KcpPeer::connect).
 ///
 /// # Cancel safety
 ///

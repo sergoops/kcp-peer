@@ -20,27 +20,55 @@ use crate::session::{self, epoch_ms, Session, SessionState};
 /// Events produced by [`KcpPeer`].
 ///
 /// Delivered via a `tokio::sync::broadcast` channel. Subscribe with [`KcpPeer::events`].
+///
+/// # Event ordering
+///
+/// For a normal outbound connection the sequence is:
+/// 1. [`Connected`](Event::Connected) — handshake complete
+/// 2. [`Data`](Event::Data) — application messages (if subscribers exist)
+/// 3. [`Disconnected`](Event::Disconnected) — session ended
+///
+/// For crash recovery the sequence is:
+/// 1. [`PeerRestarted`](Event::PeerRestarted) — old session detected stale
+/// 2. [`Connected`](Event::Connected) — new session established
 #[derive(Debug, Clone)]
 pub enum Event {
     /// Application data received from a peer.
     ///
-    /// Only emitted when `receiver_count() > 0`. When no event subscribers exist,
-    /// [`KcpConnection::poll_read`](crate::KcpConnection) reads directly from KCP.
+    /// Only emitted when there are event subscribers
+    /// ([`receiver_count() > 0`](broadcast::Sender::receiver_count)).
+    /// When no event subscribers exist, [`KcpConnection::poll_read`](crate::KcpConnection)
+    /// reads directly from KCP instead.
     Data(SocketAddr, Bytes),
     /// Handshake completed or inbound connection accepted.
     ///
-    /// For the outbound side this fires when SYN_ACK arrives (session → `Established`).
-    /// For the inbound side it fires when the SYN is processed.
+    /// For the **outbound** (initiator) side: fires when `SYN_ACK` arrives
+    /// and the session transitions to [`Established`](crate::session::SessionState::Established).
+    ///
+    /// For the **inbound** (receiver) side: fires immediately when the `SYN` is
+    /// processed, before the session is inserted into the peer map.
     Connected(SocketAddr),
     /// Session closed.
     ///
-    /// Fires on session timeout, receiving a RESET packet, or explicit [`KcpPeer::disconnect`].
+    /// Fires when one of:
+    /// * Idle timeout — no packets received for [`session_timeout`](crate::KcpConfig::session_timeout)
+    /// * Dead link — KCP retransmission limit exhausted (peer unreachable)
+    /// * Incoming [`Reset`](crate::packet::PacketType::Reset) packet
+    /// * Explicit [`disconnect()`](crate::KcpPeer::disconnect) call
+    ///
+    /// The session is removed from the internal map before this event fires.
+    /// Subsequent [`send()`](crate::KcpPeer::send) calls will auto-reconnect.
     Disconnected(SocketAddr),
     /// Peer restarted — old session was force-replaced by a new incarnation.
     ///
-    /// Fires when a SYN arrives from an address with an existing `Established` session
-    /// but a different incarnation (random ID generated on bind). Always followed by
-    /// [`Connected`](Event::Connected) for the new session.
+    /// Fires when a `SYN` arrives from an address that already has an
+    /// [`Established`](crate::session::SessionState::Established) session but
+    /// carries a different incarnation (random ID generated on every
+    /// [`bind`](crate::KcpPeer::bind)).
+    ///
+    /// Always followed by [`Connected`](Event::Connected) for the new session.
+    /// The old session handle is now stale — obtain a new one via
+    /// [`connect()`](crate::KcpPeer::connect).
     PeerRestarted(SocketAddr),
 }
 
@@ -49,11 +77,32 @@ pub type EventReceiver = broadcast::Receiver<Event>;
 
 /// A symmetric P2P transport over a single UDP socket.
 ///
-/// Each remote peer is identified by its `SocketAddr`. At most one session per peer.
-/// Sessions are auto-created on first [`send`](KcpPeer::send) or incoming SYN.
-/// Background receive and update tasks are spawned on bind and cancelled on drop.
+/// All peers share one UDP socket. Sessions are identified by remote
+/// `SocketAddr` (canonicalized — IPv4-mapped IPv6 → plain IPv4).
+/// At most one session per peer.
 ///
-/// Clone-friendly (internally `Arc`-based).
+/// # Lifecycle
+///
+/// 1. **Bind** — [`bind()`](KcpPeer::bind) or [`bind_with()`](KcpPeer::bind_with)
+///    binds a UDP socket and spawns background receive + update tasks.
+/// 2. **Connect** — first [`send()`](KcpPeer::send) or [`connect()`](KcpPeer::connect)
+///    to an unknown address auto-creates a session and sends a `SYN` handshake.
+///    Data queued during the handshake is buffered and flushed once the session
+///    is established.
+/// 3. **Established** — data flows bidirectionally over KCP. The background
+///    update task drives retransmission and detects DeadLink.
+/// 4. **Teardown** — sessions close on timeout, DeadLink, incoming `RESET`,
+///    or explicit [`disconnect()`](KcpPeer::disconnect).
+///    [`shutdown()`](KcpPeer::shutdown) sends `RESET` (3 copies) to all peers.
+/// 5. **Drop** — dropping the [`KcpPeer`](KcpPeer) cancels background tasks.
+///    The UDP socket closes when all `Arc` references are released.
+///
+/// For a state-machine diagram see [`SessionState`](crate::session::SessionState).
+///
+/// # Clone-friendly
+///
+/// Internally `Arc`-based. Cloning [`KcpPeer`](KcpPeer) shares the same
+/// socket, session map, and background tasks.
 ///
 /// # Cancel safety
 ///
@@ -161,7 +210,23 @@ impl KcpPeer {
     /// Send data to a peer.
     ///
     /// Auto-initiates a handshake (SYN) if no session exists for this peer.
-    /// Data is queued immediately and flushed once the session is established.
+    /// Data is queued into KCP immediately and flushed once the session
+    /// transitions to [`Established`](crate::session::SessionState::Established).
+    ///
+    /// If the session is in [`SynSent`](crate::session::SessionState::SynSent)
+    /// (handshake in progress), the data is buffered — the update task retries
+    /// the handshake with exponential backoff (see
+    /// [`syn_retry_interval`](crate::KcpConfig::syn_retry_interval)).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DeadLink`](crate::Error::DeadLink) if the session's KCP
+    /// retransmission limit is exhausted (peer unreachable).
+    /// Returns [`SessionClosed`](crate::Error::SessionClosed) if the session
+    /// was already removed (timeout, RESET, or [`disconnect()`](KcpPeer::disconnect)).
+    ///
+    /// In both cases, calling [`send()`](KcpPeer::send) again will
+    /// auto-reconnect — the error is not fatal.
     ///
     /// # Cancel safety
     ///
@@ -188,7 +253,20 @@ impl KcpPeer {
     /// Initiate (or return existing) connection to a peer.
     ///
     /// Idempotent — returns the existing `KcpConnection` if the session already exists.
-    /// The returned handle implements `AsyncRead` + `AsyncWrite` for use with tokio I/O utilities.
+    /// Never fails: even if the SYN send fails, the session is created and
+    /// the background update task will retry the handshake.
+    ///
+    /// The returned handle implements [`AsyncRead`](tokio::io::AsyncRead) +
+    /// [`AsyncWrite`](tokio::io::AsyncWrite) for use with tokio framing utilities
+    /// (`Framed`, `LengthDelimitedCodec`, etc.).
+    ///
+    /// # Interaction with event subscribers
+    ///
+    /// When event subscribers exist (via [`events()`](KcpPeer::events)),
+    /// incoming data is drained into [`Event::Data`](crate::Event::Data) and
+    /// [`KcpConnection::poll_read`](crate::KcpConnection) returns `Pending`.
+    /// To read via [`KcpConnection`](crate::KcpConnection), avoid subscribing to
+    /// events, or read data from [`Event::Data`](crate::Event::Data) instead.
     ///
     /// # Cancel safety
     ///
@@ -277,7 +355,10 @@ impl KcpPeer {
 
     /// Force close a session with a peer.
     ///
-    /// Removes the session and fires [`Event::Disconnected`].
+    /// Removes the local session and fires [`Event::Disconnected`].
+    /// Unlike [`shutdown()`](KcpPeer::shutdown), no `RESET` packet is sent
+    /// to the remote side — the remote will discover the disconnection
+    /// only when its session times out.
     pub fn disconnect(&self, peer: SocketAddr) {
         let can = canonicalize(peer);
         if let Some(s) = self.sessions.write().unwrap().remove(&can) {
@@ -288,10 +369,13 @@ impl KcpPeer {
 
     /// Gracefully shut down, sending RESET to all peers.
     ///
-    /// Cancels background tasks, sends RESET packets (3 copies each) to every
-    /// active peer to maximise delivery probability, and awaits task completion.
-    /// On drop (without calling `shutdown`), tasks are cancelled but no RESET
-    /// packets are sent.
+    /// 1. Cancels background tasks (shutdown token).
+    /// 2. Sends a `RESET` packet (3 copies for reliability) to every active peer.
+    /// 3. Waits for the receive and update tasks to exit.
+    ///
+    /// On drop (without calling [`shutdown()`](KcpPeer::shutdown)), background
+    /// tasks are cancelled but **no `RESET` packets are sent** — remote peers
+    /// will discover the disconnection only when their session timers expire.
     ///
     /// # Cancel safety
     ///

@@ -50,9 +50,61 @@ pub struct SessionInner {
 }
 
 /// Session state machine.
+///
+/// ```text
+///                         ┌──────────────────────────┐
+///                         │      No session           │
+///                         └───────────┬──────────────┘
+///                                     │ send() / connect()
+///                                     │ (or incoming SYN)
+///                                     v
+///                         ┌──────────────────────────┐
+///                  ┌─────│        SynSent            │
+///                  │     │  (SYN sent, waiting for   │
+///                  │     │   SYN_ACK or SYN from peer)│
+///                  │     └───────────┬──────────────┘
+///                  │                 │ SYN_ACK received
+///                  │            ┌────┴────┐
+///                  │            │         │
+///                  │      tie-break   match conv
+///                  │     (simultaneous  (normal)
+///                  │      handshake)
+///                  │            └────┬────┘
+///                  │                 v
+///         ┌────────┴────────┐
+///         │  Established    │
+///         │ (data can flow) │
+///         └────────┬────────┘
+///                  │
+///        ┌─────────┼──────────┐
+///        v         v          v
+///   timeout   DeadLink    RESET / disconnect()
+///        │         │          │
+///        └─────────┴──────────┘
+///                  v
+///         ┌──────────────────┐
+///         │  Session removed │  ← Event::Disconnected fired
+///         │  from session map│
+///         └──────────────────┘
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionState {
+    /// Outbound SYN sent, waiting for SYN_ACK (or inbound SYN for simultaneous handshake).
+    ///
+    /// Data queued via [`send_data()`](Session::send_data) is buffered in KCP
+    /// but not flushed until the session transitions to [`Established`](SessionState::Established).
+    /// The background update task retransmits SYN with exponential backoff;
+    /// after [`syn_max_retries`](crate::KcpConfig::syn_max_retries) the session
+    /// is pruned and [`Event::Disconnected`](crate::Event::Disconnected) fires.
     SynSent,
+    /// Handshake complete — KCP data can be sent and received.
+    ///
+    /// The session remains in this state until one of:
+    /// * Idle timeout (no packets received for [`session_timeout`](crate::KcpConfig::session_timeout))
+    /// * KCP retransmission exhaustion ([`DeadLink`](crate::Error::DeadLink))
+    /// * Explicit [`disconnect()`](crate::KcpPeer::disconnect) or incoming RESET
+    /// * Crash recovery: SYN from same address with a different incarnation
+    ///   replaces this session with a new one (fires [`PeerRestarted`](crate::Event::PeerRestarted))
     Established,
 }
 

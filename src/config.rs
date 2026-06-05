@@ -34,9 +34,25 @@ pub struct KcpConfig {
     /// If subscribers are slower than the event rate, old events are dropped.
     /// Check [`Event::EventChannelLagged`](crate::Error::EventChannelLagged).
     pub event_channel_capacity: usize,
-    /// How long to wait before retransmitting a SYN (handshake initiation) packet.
+    /// Base interval for SYN retransmission with exponential backoff.
+    ///
+    /// The wait before retry `i` (0-indexed) is `base * 2^i`. Default 150ms
+    /// with [`syn_max_retries`](KcpConfig::syn_max_retries) = 5 gives the
+    /// timeline:
+    /// - T+0.15s — retry 1
+    /// - T+0.45s — retry 2
+    /// - T+1.05s — retry 3
+    /// - T+2.25s — retry 4
+    /// - T+4.65s — retry 5, then [`DeadLink`](crate::Error::DeadLink)
+    ///
+    /// The initial SYN is sent immediately in [`new_outbound()`](crate::Session::new_outbound);
+    /// only subsequent retries follow this schedule.
     pub syn_retry_interval: Duration,
-    /// Maximum number of SYN retransmissions before declaring DeadLink.
+    /// Maximum number of SYN retransmissions before the handshake is abandoned
+    /// and [`DeadLink`](crate::Error::DeadLink) is reported.
+    ///
+    /// Default is 5, giving ~4.7s total time to exhaustion with the default
+    /// [`syn_retry_interval`](KcpConfig::syn_retry_interval).
     pub syn_max_retries: u32,
 }
 
