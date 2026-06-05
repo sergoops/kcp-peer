@@ -156,20 +156,35 @@ impl Session {
     }
 
     /// Send data through this session.
-    /// Queues data to KCP's send buffer. The background update task flushes it.
+    /// Queues data to KCP. Flushes immediately if the session is established.
     pub fn send_data(&self, data: &[u8]) -> Result<()> {
         if self.closed.load(Ordering::Acquire) {
             return Err(Error::SessionClosed);
         }
         let mut inner = self.inner.lock().unwrap();
         inner.kcp.send(data)?;
+        if matches!(inner.state, SessionState::Established) {
+            let now = current_ms();
+            inner.kcp.update(now)?;
+            inner.kcp.flush()?;
+        }
+        if inner.kcp.is_dead_link() {
+            return Err(Error::DeadLink);
+        }
         Ok(())
     }
 
     /// Drive KCP update timer. Returns number of segments still in flight.
+    /// Returns `DeadLink` if KCP has exhausted retransmissions.
     pub fn update(&self, current_ms: u32) -> Result<usize> {
         let mut inner = self.inner.lock().unwrap();
+        if inner.kcp.is_dead_link() {
+            return Err(Error::DeadLink);
+        }
         inner.kcp.update(current_ms)?;
+        if inner.kcp.is_dead_link() {
+            return Err(Error::DeadLink);
+        }
         Ok(inner.kcp.wait_snd())
     }
 

@@ -12,8 +12,8 @@ pub enum Error {
     #[error("session with {0} not found")]
     SessionNotFound(SocketAddr),
 
-    #[error("handshake to {0} timed out")]
-    HandshakeTimeout(SocketAddr),
+    #[error("KCP connection is dead — no ACK from peer")]
+    DeadLink,
 
     #[error("transport is shutting down")]
     ShuttingDown,

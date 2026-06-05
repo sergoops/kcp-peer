@@ -44,7 +44,9 @@ pub struct KcpPeer {
     pub(crate) event_tx: broadcast::Sender<Event>,
     pub(crate) incarnation: u64,
     pub(crate) shutdown: CancellationToken,
-    pub(crate) _bg_handle: tokio::task::JoinHandle<()>,
+    pub(crate) config: Arc<KcpConfig>,
+    pub(crate) _recv_handle: tokio::task::JoinHandle<()>,
+    pub(crate) _update_handle: tokio::task::JoinHandle<()>,
     pub(crate) local_addr: SocketAddr,
 }
 
@@ -63,24 +65,23 @@ impl KcpPeer {
         let shutdown = CancellationToken::new();
         let sessions: Arc<std::sync::RwLock<HashMap<CanonicalAddr, Arc<Session>>>> =
             Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let config = Arc::new(config);
 
-        let bg_socket = socket.clone();
-        let bg_sessions = sessions.clone();
-        let bg_event_tx = event_tx.clone();
-        let bg_shutdown = shutdown.clone();
-        let bg_config = config.clone();
+        let recv_handle = spawn_receive_task(
+            socket.clone(),
+            sessions.clone(),
+            event_tx.clone(),
+            config.clone(),
+            incarnation,
+            shutdown.clone(),
+        );
 
-        let handle = tokio::spawn(async move {
-            bg_task(
-                bg_socket,
-                bg_sessions,
-                bg_event_tx,
-                bg_config,
-                incarnation,
-                bg_shutdown,
-            )
-            .await;
-        });
+        let update_handle = spawn_update_task(
+            sessions.clone(),
+            event_tx.clone(),
+            config.clone(),
+            shutdown.clone(),
+        );
 
         Ok(Self {
             socket,
@@ -88,7 +89,9 @@ impl KcpPeer {
             event_tx,
             incarnation,
             shutdown,
-            _bg_handle: handle,
+            config,
+            _recv_handle: recv_handle,
+            _update_handle: update_handle,
             local_addr,
         })
     }
@@ -138,7 +141,7 @@ impl KcpPeer {
             peer,
             self.socket.clone(),
             self.incarnation,
-            &self.get_config(),
+            self.config.as_ref(),
         ).await?;
 
         let can = canonicalize(peer);
@@ -207,12 +210,10 @@ impl KcpPeer {
             let reset = packet::encode_control(PacketType::Reset, conv_id);
             let _ = self.socket.try_send_to(&reset, s.peer_addr);
         }
-        self._bg_handle.await.ok();
+        self._recv_handle.await.ok();
+        self._update_handle.await.ok();
     }
 
-    fn get_config(&self) -> KcpConfig {
-        KcpConfig::default()
-    }
 }
 
 /// Per-peer connection statistics.
@@ -227,88 +228,118 @@ pub struct PeerStats {
     pub elapsed: Duration,
 }
 
-// ─── Background Task ─────────────────────────────────────────────────
+// ─── Background Tasks ────────────────────────────────────────────────
 
-async fn bg_task(
+/// Spawn the receive task: reads UDP packets and dispatches to sessions.
+fn spawn_receive_task(
     socket: Arc<UdpSocket>,
     sessions: Arc<std::sync::RwLock<HashMap<CanonicalAddr, Arc<Session>>>>,
     event_tx: broadcast::Sender<Event>,
-    config: KcpConfig,
+    config: Arc<KcpConfig>,
     incarnation: u64,
     shutdown: CancellationToken,
-) {
-    let mut tick = tokio::time::interval(config.tick_interval);
-    let mut recv_buf = vec![0u8; 65535];
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut recv_buf = vec![0u8; 65535];
 
-    loop {
-        tokio::select! {
-            biased;
+        loop {
+            tokio::select! {
+                biased;
 
-            _ = shutdown.cancelled() => break,
+                _ = shutdown.cancelled() => break,
 
-            recv = socket.recv_from(&mut recv_buf) => {
-                let (n, from) = match recv {
-                    Ok(v) => v,
-                    Err(e) => {
-                        tracing::warn!("recv_from error: {e}");
-                        continue;
-                    }
-                };
-                let data = &recv_buf[..n];
-                tracing::trace!("recv {} bytes from {}: {:02x?}", n, from, data);
-                if let Err(e) = handle_incoming(
-                    data, from, &socket, &sessions, &event_tx,
-                    incarnation, &config,
-                ).await {
-                    tracing::debug!("handle_incoming from {from}: {e}");
-                }
-            }
-
-            _ = tick.tick() => {
-                let now_ms = session::current_ms();
-
-                let mut to_remove: Vec<CanonicalAddr> = Vec::new();
-
-                {
-                    let map = sessions.read().unwrap();
-                    for (can, sess) in map.iter() {
-                        if sess.closed.load(Ordering::Acquire) {
+                recv = socket.recv_from(&mut recv_buf) => {
+                    let (n, from) = match recv {
+                        Ok(v) => v,
+                        Err(e) => {
+                            tracing::warn!("recv_from error: {e}");
                             continue;
                         }
-
-                        let is_established = {
-                            let inner = sess.inner.lock().unwrap();
-                            matches!(inner.state, SessionState::Established)
-                        };
-
-                        if is_established {
-                            if let Err(e) = sess.update(now_ms) {
-                                tracing::debug!("update error for {}: {e}", sess.peer_addr);
-                            }
-                        }
-
-                        // session timeout check
-                        let last_rx_ms = sess.last_rx.load(Ordering::Acquire);
-                        if last_rx_ms > 0 {
-                            let age = Duration::from_millis(epoch_ms().saturating_sub(last_rx_ms));
-                            if age > config.session_timeout {
-                                to_remove.push(*can);
-                            }
-                        }
-                    }
-                }
-
-                for can in to_remove {
-                    if let Some(sess) = sessions.write().unwrap().remove(&can) {
-                        sess.mark_closed();
-                        let _ = event_tx.send(Event::Disconnected(sess.peer_addr));
+                    };
+                    let data = &recv_buf[..n];
+                    tracing::trace!("recv {} bytes from {}: {:02x?}", n, from, data);
+                    if let Err(e) = handle_incoming(
+                        data, from, &socket, &sessions, &event_tx,
+                        incarnation, config.as_ref(),
+                    ).await {
+                        tracing::debug!("handle_incoming from {from}: {e}");
                     }
                 }
             }
         }
-    }
 
-    tracing::info!("background task stopped");
+        tracing::trace!("receive task stopped");
+    })
+}
+
+/// Spawn the update task: drives KCP updates and prunes stale sessions.
+fn spawn_update_task(
+    sessions: Arc<std::sync::RwLock<HashMap<CanonicalAddr, Arc<Session>>>>,
+    event_tx: broadcast::Sender<Event>,
+    config: Arc<KcpConfig>,
+    shutdown: CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(config.tick_interval);
+
+        loop {
+            tokio::select! {
+                biased;
+
+                _ = shutdown.cancelled() => break,
+
+                _ = tick.tick() => {
+                    let now_ms = session::current_ms();
+                    let mut to_remove: Vec<CanonicalAddr> = Vec::new();
+
+                    {
+                        let map = sessions.read().unwrap();
+                        for (can, sess) in map.iter() {
+                            if sess.closed.load(Ordering::Acquire) {
+                                continue;
+                            }
+
+                            let is_established = {
+                                let inner = sess.inner.lock().unwrap();
+                                matches!(inner.state, SessionState::Established)
+                            };
+
+                            if is_established {
+                                match sess.update(now_ms) {
+                                    Err(crate::error::Error::DeadLink) => {
+                                        to_remove.push(*can);
+                                        continue;
+                                    }
+                                    Err(e) => {
+                                        tracing::debug!("update error for {}: {e}", sess.peer_addr);
+                                    }
+                                    Ok(_) => {}
+                                }
+                            }
+
+                            // session timeout check
+                            let last_rx_ms = sess.last_rx.load(Ordering::Acquire);
+                            if last_rx_ms > 0 {
+                                let age = Duration::from_millis(epoch_ms().saturating_sub(last_rx_ms));
+                                if age > config.session_timeout {
+                                    to_remove.push(*can);
+                                }
+                            }
+                        }
+                    }
+
+                    for can in to_remove {
+                        if let Some(sess) = sessions.write().unwrap().remove(&can) {
+                            sess.mark_closed();
+                            let _ = event_tx.send(Event::Disconnected(sess.peer_addr));
+                        }
+                    }
+                }
+            }
+        }
+
+        tracing::trace!("update task stopped");
+    })
 }
 
 /// Route an incoming UDP packet to the correct session or control handler.

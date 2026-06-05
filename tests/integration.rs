@@ -335,3 +335,141 @@ async fn multiple_peers() {
     drop(b);
     drop(c);
 }
+
+// ─── Large message (KCP segmentation) ──────────────────────────────────
+
+#[tokio::test]
+async fn large_message() {
+    let (a, b, _addr_a, addr_b) = bind_pair().await;
+    let mut events_b = b.events();
+
+    let payload = vec![0xABu8; 15_000];
+    a.send(addr_b, &payload).await.expect("send large");
+
+    let _ = wait_for(&mut events_b, |e| matches!(e, Event::Connected(_)), Duration::from_secs(5)).await;
+    let data = wait_for(&mut events_b, |e| matches!(e, Event::Data(..)), Duration::from_secs(5)).await;
+    match data {
+        Event::Data(_addr, msg) => {
+            assert_eq!(msg.len(), 15_000, "large message size");
+            assert_eq!(&msg[..], &payload[..], "large message content");
+        }
+        _ => unreachable!(),
+    }
+
+    drop(a);
+    drop(b);
+}
+
+// ─── Reconnect after disconnect ───────────────────────────────────────
+
+#[tokio::test]
+async fn reconnect() {
+    let (a, b, _addr_a, addr_b) = bind_pair().await;
+    let mut events_b = b.events();
+
+    a.send(addr_b, b"first").await.expect("first send");
+    let _ = wait_for(&mut events_b, |e| matches!(e, Event::Data(..)), Duration::from_secs(5)).await;
+
+    // Force-disconnect on both sides
+    a.disconnect(addr_b);
+    let _ = wait_for(&mut events_b, |e| matches!(e, Event::Disconnected(_)), Duration::from_secs(5)).await;
+
+    sleep(Duration::from_millis(100)).await;
+
+    // Reconnect
+    a.send(addr_b, b"second").await.expect("reconnect send");
+    let data = wait_for(&mut events_b, |e| matches!(e, Event::Data(..)), Duration::from_secs(5)).await;
+    match data {
+        Event::Data(_addr, msg) => {
+            assert_eq!(&msg[..], b"second", "reconnected message");
+        }
+        _ => unreachable!(),
+    }
+
+    drop(a);
+    drop(b);
+}
+
+// ─── Dead link detection ──────────────────────────────────────────────
+
+#[tokio::test]
+async fn dead_link() {
+    let config = KcpConfig::builder()
+        .tick_interval(Duration::from_millis(10))
+        .kcp_interval_ms(10)
+        .kcp_nodelay(1, 10, 2, true)
+        .maximum_resend_times(1)
+        .rx_minrto(10)
+        .fast_resend(1)
+        .build();
+
+    let a = KcpPeer::bind_with("127.0.0.1:0", config.clone())
+        .await
+        .expect("bind A");
+    let b = KcpPeer::bind_with("127.0.0.1:0", config)
+        .await
+        .expect("bind B");
+    let addr_b = b.local_addr();
+    let mut events_a = a.events();
+
+    // Establish session
+    a.send(addr_b, b"ping").await.expect("first send");
+    let _ = wait_for(&mut events_a, |e| matches!(e, Event::Connected(_)), Duration::from_secs(5)).await;
+
+    // Drop B — KCP should exhaust retransmissions quickly with max_retransmits=1
+    drop(b);
+
+    // Dead link should fire Disconnected
+    let _ = wait_for(
+        &mut events_a,
+        |e| matches!(e, Event::Disconnected(_)),
+        Duration::from_secs(5),
+    )
+    .await;
+
+    drop(a);
+}
+
+// ─── Many small messages ──────────────────────────────────────────────
+
+#[tokio::test]
+async fn many_small_messages() {
+    let (a, b, _addr_a, addr_b) = bind_pair().await;
+    let mut events_b = b.events();
+
+    let count = 100;
+    for i in 0..count {
+        let msg = vec![i as u8; 1];
+        a.send(addr_b, &msg).await.expect("send small");
+    }
+
+    let _ = wait_for(&mut events_b, |e| matches!(e, Event::Connected(_)), Duration::from_secs(5)).await;
+
+    let mut received = 0;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while received < count {
+        let remaining = deadline - tokio::time::Instant::now();
+        if remaining.is_zero() {
+            panic!("timed out after {received}/{count} messages");
+        }
+        match tokio::time::timeout(remaining, events_b.recv()).await {
+            Ok(Ok(Event::Data(_addr, msg))) => {
+                assert_eq!(msg.len(), 1, "message {} size", received);
+                assert_eq!(msg[0], received as u8, "message {} content", received);
+                received += 1;
+            }
+            Ok(Ok(_)) => continue,
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(n))) => {
+                panic!("event channel lagged by {n}");
+            }
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+                panic!("event channel closed");
+            }
+            Err(_) => panic!("timed out after {received}/{count} messages"),
+        }
+    }
+
+    assert_eq!(received, count, "all small messages received");
+    drop(a);
+    drop(b);
+}
