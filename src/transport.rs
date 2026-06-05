@@ -54,6 +54,19 @@ pub type EventReceiver = broadcast::Receiver<Event>;
 /// Background receive and update tasks are spawned on bind and cancelled on drop.
 ///
 /// Clone-friendly (internally `Arc`-based).
+///
+/// # Cancel safety
+///
+/// All async methods on `KcpPeer` are **cancel-safe**:
+///
+/// - [`send`](KcpPeer::send) and [`connect`](KcpPeer::connect) either complete fully
+///   (session created, data queued) or leave no state behind. No intermediate
+///   session leaks if the future is dropped mid-flight.
+/// - [`shutdown`](KcpPeer::shutdown) sends RESETs synchronously then awaits
+///   background tasks; cancellation during the await leaves tasks that still
+///   exit promptly (shutdown token is already cancelled).
+/// - [`bind_with`](KcpPeer::bind_with) is cancel-safe — dropped before the socket
+///   binds, no state is created.
 pub struct KcpPeer {
     pub(crate) socket: Arc<UdpSocket>,
     pub(crate) sessions: Arc<std::sync::RwLock<HashMap<CanonicalAddr, Arc<Session>>>>,
@@ -92,6 +105,11 @@ impl KcpPeer {
     /// Bind to a local address with the given [`KcpConfig`].
     ///
     /// Each bind generates a random incarnation number used for crash detection.
+    ///
+    /// # Cancel safety
+    ///
+    /// Cancel-safe. If the future is dropped before the UDP socket is bound,
+    /// no state is created and no background tasks are spawned.
     pub async fn bind_with(
         addr: impl tokio::net::ToSocketAddrs,
         config: KcpConfig,
@@ -143,6 +161,12 @@ impl KcpPeer {
     ///
     /// Auto-initiates a handshake (SYN) if no session exists for this peer.
     /// Data is queued immediately and flushed once the session is established.
+    ///
+    /// # Cancel safety
+    ///
+    /// Cancel-safe. If cancelled during handshake initiation, no session is
+    /// created (the future is dropped before the session map is modified).
+    /// Safe to use inside `tokio::select!`.
     pub async fn send(&self, peer: SocketAddr, data: &[u8]) -> Result<()> {
         let can = canonicalize(peer);
 
@@ -164,6 +188,11 @@ impl KcpPeer {
     ///
     /// Idempotent — returns the existing `KcpConnection` if the session already exists.
     /// The returned handle implements `AsyncRead` + `AsyncWrite` for use with tokio I/O utilities.
+    ///
+    /// # Cancel safety
+    ///
+    /// Cancel-safe. Same semantics as [`send`](KcpPeer::send) — no partial state
+    /// is left behind if the future is dropped mid-flight.
     pub async fn connect(&self, peer: SocketAddr) -> Result<KcpConnection> {
         let can = canonicalize(peer);
 
@@ -203,6 +232,12 @@ impl KcpPeer {
     /// Returns a `tokio::sync::broadcast::Receiver`. Each subscriber gets all events
     /// from the point of subscription onward. Events include [`Connected`](Event::Connected),
     /// [`Disconnected`](Event::Disconnected), [`Data`](Event::Data), and [`PeerRestarted`](Event::PeerRestarted).
+    ///
+    /// # Cancel safety
+    ///
+    /// [`broadcast::Receiver::recv`](tokio::sync::broadcast::Receiver::recv) is
+    /// cancel-safe — dropping the future does not consume the event. Other
+    /// subscribers are unaffected.
     pub fn events(&self) -> EventReceiver {
         self.event_tx.subscribe()
     }
@@ -255,6 +290,13 @@ impl KcpPeer {
     /// Cancels background tasks, sends a RESET packet to each active peer,
     /// and awaits task completion. On drop (without calling `shutdown`),
     /// tasks are cancelled but no RESET packets are sent.
+    ///
+    /// # Cancel safety
+    ///
+    /// Cancel-safe. RESET packets are sent synchronously before any await.
+    /// If cancelled while awaiting background task handles, those tasks are
+    /// still guaranteed to exit promptly (the shutdown token was already
+    /// cancelled). Takes `self` so it can only be called once.
     pub async fn shutdown(mut self) {
         self.shutdown.cancel();
         // send RESET to all active sessions

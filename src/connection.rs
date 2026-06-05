@@ -17,6 +17,13 @@ use crate::session::Session;
 /// When event subscribers exist on the [`KcpPeer`](crate::KcpPeer), incoming data is drained
 /// into [`Event::Data`](crate::Event::Data) and `poll_read` returns `Pending`.
 /// To read via `KcpConnection`, avoid subscribing to events, or read data from events instead.
+///
+/// # Cancel safety
+///
+/// All `poll_*` methods return immediately (synchronously) — they never
+/// register a waker that would leave state inconsistent on drop. The
+/// `AtomicWaker` registered in `poll_read` is cancel-safe: dropping the
+/// waker-future is harmless (a subsequent wake finds no task and is a no-op).
 #[derive(Debug, Clone)]
 pub struct KcpConnection {
     pub(crate) session: Arc<Session>,

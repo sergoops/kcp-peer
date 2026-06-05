@@ -135,6 +135,22 @@ When a peer restarts on the same address, the new instance generates a random in
 
 The incarnation number prevents stale SYN packets from interfering with active sessions.
 
+## Cancel Safety
+
+All public async APIs in `kcp-peer` are **cancel-safe** — dropping the future
+mid-execution never leaves internal state inconsistent or leaks resources:
+
+| API | Why it's safe |
+|-----|---------------|
+| `bind_with()` | Only one await (`UdpSocket::bind`); cancellation before completion creates no state. |
+| `send()` / `connect()` | Session is created and inserted into the map in synchronous code after the only await point. If cancelled during `initiate_session`, no session record is created. |
+| `shutdown()` | RESET packets are sent synchronously before the first await. The cancellation token is already fired when the await runs, so background tasks still exit promptly. |
+| `events()` → `recv()` | `broadcast::Receiver::recv` is cancel-safe (tokio guarantee). Dropping the future does not consume the event. |
+| `KcpConnection::poll_*` | All methods are synchronous (`Poll::Ready`). No waker registration that would leave dangling state on drop. |
+
+No special combinator usage is required on your side — `tokio::select!`,
+`join!`, `spawn`, or direct `.await` all work correctly.
+
 ## Configuration Reference
 
 | Field | Default | Description |
