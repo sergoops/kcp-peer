@@ -367,9 +367,12 @@ async fn handle_incoming(
                 Some(s) => {
                     s.last_rx.store(epoch_ms(), Ordering::Release);
                     s.input(payload)?;
-                    // drain any complete messages from KCP and fire Data events
-                    while let Some(msg) = s.try_recv()? {
-                        let _ = event_tx.send(Event::Data(s.peer_addr, msg.freeze()));
+                    // Only drain messages for event subscribers; otherwise
+                    // KcpConnection::poll_read reads directly from KCP.
+                    if event_tx.receiver_count() > 0 {
+                        while let Some(msg) = s.try_recv()? {
+                            let _ = event_tx.send(Event::Data(s.peer_addr, msg.freeze()));
+                        }
                     }
                 }
                 None => {
