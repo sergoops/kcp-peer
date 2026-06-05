@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
@@ -20,11 +20,13 @@ use crate::session::{self, epoch_ms, Session, SessionState};
 ///
 /// Delivered via a `tokio::sync::broadcast` channel. Subscribe with [`KcpPeer::events`].
 ///
+/// Data is read separately via [`KcpPeer::recv()`], not through events.
+///
 /// # Event ordering
 ///
 /// For a normal outbound connection the sequence is:
 /// 1. [`Connected`](Event::Connected) — handshake complete
-/// 2. [`Data`](Event::Data) — application messages (if subscribers exist)
+/// 2. Data via [`recv()`](KcpPeer::recv) — application messages
 /// 3. [`Disconnected`](Event::Disconnected) — session ended
 ///
 /// For crash recovery the sequence is:
@@ -32,11 +34,6 @@ use crate::session::{self, epoch_ms, Session, SessionState};
 /// 2. [`Connected`](Event::Connected) — new session established
 #[derive(Debug, Clone)]
 pub enum Event {
-    /// Application data received from a peer.
-    ///
-    /// Only emitted when there are event subscribers
-    /// ([`receiver_count() > 0`](broadcast::Sender::receiver_count)).
-    Data(SocketAddr, Bytes),
     /// Handshake completed or inbound connection accepted.
     ///
     /// For the **outbound** (initiator) side: fires when `SYN_ACK` arrives
@@ -67,6 +64,18 @@ pub enum Event {
     /// The old session handle is now stale — call [`send()`](crate::KcpPeer::send)
     /// to use the new session.
     PeerRestarted(SocketAddr),
+}
+
+/// Application data received from a peer.
+///
+/// Returned by [`KcpPeer::recv()`]. Data is pulled from KCP on demand —
+/// no broadcast channel involved.
+#[derive(Debug, Clone)]
+pub struct DataMessage {
+    /// Remote peer address.
+    pub peer: SocketAddr,
+    /// Application payload.
+    pub data: Bytes,
 }
 
 /// Receiver for [`Event`]s. Clone the broadcast receiver.
@@ -117,6 +126,8 @@ pub struct KcpPeer {
     pub(crate) socket: Arc<UdpSocket>,
     pub(crate) sessions: Arc<std::sync::RwLock<HashMap<CanonicalAddr, Arc<Session>>>>,
     pub(crate) event_tx: broadcast::Sender<Event>,
+    pub(crate) pending_data: Arc<std::sync::Mutex<VecDeque<DataMessage>>>,
+    pub(crate) data_notify: Arc<tokio::sync::Notify>,
     pub(crate) incarnation: u64,
     pub(crate) shutdown: CancellationToken,
     pub(crate) config: Arc<KcpConfig>,
@@ -168,11 +179,15 @@ impl KcpPeer {
         let sessions: Arc<std::sync::RwLock<HashMap<CanonicalAddr, Arc<Session>>>> =
             Arc::new(std::sync::RwLock::new(HashMap::new()));
         let config = Arc::new(config);
+        let pending_data = Arc::new(std::sync::Mutex::new(VecDeque::new()));
+        let data_notify = Arc::new(tokio::sync::Notify::new());
 
         let recv_handle = spawn_receive_task(
             socket.clone(),
             sessions.clone(),
             event_tx.clone(),
+            pending_data.clone(),
+            data_notify.clone(),
             config.clone(),
             incarnation,
             shutdown.clone(),
@@ -190,6 +205,8 @@ impl KcpPeer {
             socket,
             sessions,
             event_tx,
+            pending_data,
+            data_notify,
             incarnation,
             shutdown,
             config,
@@ -299,7 +316,8 @@ impl KcpPeer {
     ///
     /// Returns a `tokio::sync::broadcast::Receiver`. Each subscriber gets all events
     /// from the point of subscription onward. Events include [`Connected`](Event::Connected),
-    /// [`Disconnected`](Event::Disconnected), [`Data`](Event::Data), and [`PeerRestarted`](Event::PeerRestarted).
+    /// [`Disconnected`](Event::Disconnected), and [`PeerRestarted`](Event::PeerRestarted).
+    /// Data is read via [`recv()`](KcpPeer::recv) instead.
     ///
     /// # Cancel safety
     ///
@@ -308,6 +326,36 @@ impl KcpPeer {
     /// subscribers are unaffected.
     pub fn events(&self) -> EventReceiver {
         self.event_tx.subscribe()
+    }
+
+    /// Receive the next data message from any peer.
+    ///
+    /// Drains KCP receive buffers on demand. Data is buffered internally until
+    /// consumed. Returns `Err(ShuttingDown)` after
+    /// [`shutdown()`](KcpPeer::shutdown).
+    ///
+    /// # Cancel safety
+    ///
+    /// Cancel-safe. Dropping the future mid-wait does not lose data;
+    /// the next `recv()` call will return it.
+    pub async fn recv(&self) -> Result<DataMessage> {
+        loop {
+            if self.shutdown.is_cancelled() {
+                return Err(crate::error::Error::ShuttingDown);
+            }
+            {
+                let mut pending = self.pending_data.lock().unwrap();
+                if let Some(msg) = pending.pop_front() {
+                    return Ok(msg);
+                }
+            }
+            tokio::select! {
+                _ = self.data_notify.notified() => {}
+                _ = self.shutdown.cancelled() => {
+                    return Err(crate::error::Error::ShuttingDown);
+                }
+            }
+        }
     }
 
     /// List all connected peers (filters out closed sessions).
@@ -424,6 +472,8 @@ fn spawn_receive_task(
     socket: Arc<UdpSocket>,
     sessions: Arc<std::sync::RwLock<HashMap<CanonicalAddr, Arc<Session>>>>,
     event_tx: broadcast::Sender<Event>,
+    pending_data: Arc<std::sync::Mutex<VecDeque<DataMessage>>>,
+    data_notify: Arc<tokio::sync::Notify>,
     config: Arc<KcpConfig>,
     incarnation: u64,
     shutdown: CancellationToken,
@@ -449,6 +499,7 @@ fn spawn_receive_task(
                     tracing::trace!("recv {} bytes from {}: {:02x?}", n, from, data);
                     if let Err(e) = handle_incoming(
                         data, from, &socket, &sessions, &event_tx,
+                        &pending_data, &data_notify,
                         incarnation, config.as_ref(),
                     ).await {
                         tracing::debug!("handle_incoming from {from}: {e}");
@@ -547,6 +598,8 @@ async fn handle_incoming(
     socket: &Arc<UdpSocket>,
     sessions: &Arc<std::sync::RwLock<HashMap<CanonicalAddr, Arc<Session>>>>,
     event_tx: &broadcast::Sender<Event>,
+    pending_data: &std::sync::Mutex<VecDeque<DataMessage>>,
+    data_notify: &tokio::sync::Notify,
     incarnation: u64,
     config: &KcpConfig,
 ) -> Result<()> {
@@ -565,13 +618,19 @@ async fn handle_incoming(
                 Some(s) => {
                     s.last_rx.store(epoch_ms(), Ordering::Release);
                     s.input(payload)?;
-                    // Drain KCP messages into events for subscribers.
-                    if event_tx.receiver_count() > 0 {
-                        let mut msgs = Vec::new();
-                        s.try_recv_all(&mut msgs)?;
+                    // Drain KCP messages into pending buffer.
+                    let mut msgs = Vec::new();
+                    s.try_recv_all(&mut msgs)?;
+                    if !msgs.is_empty() {
+                        let mut pending = pending_data.lock().unwrap();
                         for msg in msgs {
-                            let _ = event_tx.send(Event::Data(s.peer_addr, msg.freeze()));
+                            pending.push_back(DataMessage {
+                                peer: s.peer_addr,
+                                data: msg.freeze(),
+                            });
                         }
+                        drop(pending);
+                        data_notify.notify_one();
                     }
                 }
                 None => {

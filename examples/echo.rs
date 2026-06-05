@@ -22,13 +22,19 @@ async fn main() {
     let mut server_events = server.events();
     tokio::spawn(async move {
         loop {
-            match server_events.recv().await {
-                Ok(Event::Data(addr, data)) => {
-                    println!("server: echo {} bytes to {addr}", data.len());
-                    let _ = server.send(addr, &data).await;
+            match server.recv().await {
+                Ok(msg) => {
+                    println!("server: echo {} bytes to {}", msg.data.len(), msg.peer);
+                    let _ = server.send(msg.peer, &msg.data).await;
                 }
-                Ok(ev) => println!("server: {ev:?}"),
                 Err(_) => break,
+            }
+        }
+        // Drain lifecycle events to keep the task alive until shutdown
+        loop {
+            match server_events.recv().await {
+                Ok(Event::Disconnected(_)) | Err(_) => break,
+                _ => {}
             }
         }
     });
@@ -38,22 +44,17 @@ async fn main() {
         let client = KcpPeer::bind_with(addr, config)
             .await
             .expect("bind client");
-        let mut events = client.events();
 
         let server_addr = SERVER_ADDR.parse().unwrap();
         client.send(server_addr, payload).await.expect("send");
 
-        loop {
-            match events.recv().await {
-                Ok(Event::Data(peer, data)) => {
-                    println!("{label}: Data({peer}, {:?})", std::str::from_utf8(&data));
-                    assert_eq!(&data[..], payload);
-                    println!("{label}: echo OK");
-                    break;
-                }
-                Ok(ev) => println!("{label}: {ev:?}"),
-                Err(_) => break,
+        match tokio::time::timeout(Duration::from_secs(5), client.recv()).await {
+            Ok(Ok(msg)) => {
+                println!("{label}: Data({}, {:?})", msg.peer, std::str::from_utf8(&msg.data));
+                assert_eq!(&msg.data[..], payload);
+                println!("{label}: echo OK");
             }
+            _ => panic!("{label}: no echo received"),
         }
 
         drop(client);

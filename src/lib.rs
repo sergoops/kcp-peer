@@ -10,4 +10,4 @@ pub use config::{KcpConfig, KcpConfigBuilder};
 pub use error::{Error, Result};
 pub use packet::PacketType;
 pub use session::Session;
-pub use transport::{Event, EventReceiver, KcpPeer, PeerStats};
+pub use transport::{DataMessage, Event, EventReceiver, KcpPeer, PeerStats};

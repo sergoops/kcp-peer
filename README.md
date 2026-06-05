@@ -8,7 +8,7 @@ Symmetric P2P transport layer around [KCP](https://github.com/skywind3000/kcp) u
 - **Single UDP socket** — all traffic (all peers) shares one bound socket.
 - **Auto-initiate** — first `send()` to an unknown peer triggers an automatic handshake.
 - **Crash recovery** — when a peer restarts on the same address, the other side detects it via incarnation mismatch and fires `PeerRestarted`.
-- **Event-driven API** — `Connected`, `Disconnected`, `Data`, `PeerRestarted` via broadcast channel.
+- **Event-driven API** — `Connected`, `Disconnected`, `PeerRestarted` via broadcast channel; data via `recv()`.
 - **Fully configurable** — all KCP parameters exposed via builder.
 
 ## Quick Start
@@ -26,18 +26,16 @@ let config = KcpConfig::builder()
 let a = KcpPeer::bind_with("127.0.0.1:0", config.clone()).await?;
 let b = KcpPeer::bind_with("127.0.0.1:0", config).await?;
 
-let mut events = b.events();
-
 a.send(b.local_addr(), b"hello").await?;
 
-// B receives Connected then Data
-match events.recv().await? {
-    Event::Connected(addr) => println!("connected {addr}"),
-    _ => {}
-}
-match events.recv().await? {
-    Event::Data(addr, data) => println!("got {:?} from {addr}", &data),
-    _ => {}
+// B receives data via recv()
+let msg = b.recv().await?;
+println!("got {:?} from {}", &msg.data, msg.peer);
+
+// Lifecycle events via events()
+let mut events = b.events();
+if let Ok(Event::Connected(addr)) = events.recv().await {
+    println!("connected {addr}");
 }
 # Ok(())
 # }
@@ -79,7 +77,8 @@ Main handle. Binds a UDP socket and spawns background receive + update tasks. Cl
 | `bind(addr)` | Bind with default config |
 | `bind_with(addr, config)` | Bind with custom config |
 | `send(peer, data)` | Send to peer; auto-initiates handshake if needed |
-| `events()` | Subscribe to the event broadcast channel |
+| `recv()` | Receive next data message from any peer (cancel-safe) |
+| `events()` | Subscribe to lifecycle event broadcast channel |
 | `peers()` | List connected peer addresses |
 | `stats(peer)` | KCP stats for a specific peer |
 | `disconnect(peer)` | Force-close a session |
@@ -90,16 +89,24 @@ Dropping `KcpPeer` cancels background tasks (shutdown token). The UDP socket clo
 
 ### `Event`
 
-Events delivered via a `tokio::sync::broadcast` channel.
+Lifecycle events delivered via a `tokio::sync::broadcast` channel.
 
 | Variant | Meaning |
 |---------|---------|
 | `Connected(SocketAddr)` | Handshake completed or inbound connection accepted |
 | `Disconnected(SocketAddr)` | Session closed (timeout, RESET received, or `disconnect()`) |
-| `Data(SocketAddr, Bytes)` | Application data received from peer |
 | `PeerRestarted(SocketAddr)` | Peer restarted — old session was replaced by a new incarnation |
 
-`Data` events are only emitted when `receiver_count() > 0`. If no event subscribers exist, incoming data is still received by KCP but not drained into events. When subscribers exist, KCP messages are drained into events — there is no other read path.
+### `DataMessage`
+
+Application data read via [`KcpPeer::recv()`](KcpPeer::recv).
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `peer` | `SocketAddr` | Remote peer address |
+| `data` | `Bytes` | Application payload |
+
+Data is pulled from KCP on demand — no broadcast channel involved. KCP receive buffers are drained into an internal pending queue when data arrives. `recv()` pops from this queue, waking via `Notify` when new data is available. If `recv()` is not called, data stays in KCP's internal buffer (which applies backpressure to the remote sender via window sizing).
 
 ### `KcpConfig`
 
@@ -141,7 +148,7 @@ Initiator                    Receiver
    |                            |
    |──── KCP_DATA ────────────→|
    |                            |  fire Connected
-   |                            |  fire Data
+   |                            |  data available via recv()
 ```
 
 Auto-initiate: when `send()` is called for an unknown address, a new session is created in `SynSent` state and a SYN is sent. The handshake completes asynchronously; queued data is flushed once the session transitions to `Established`.
@@ -243,22 +250,21 @@ Non-fatal errors are safe to handle by re-sending the data.
 | [`EventChannelLagged`](https://docs.rs/kcp-peer/latest/kcp_peer/enum.Error.html#variant.EventChannelLagged) | Event consumer too slow | Increase `event_channel_capacity` or poll faster |
 | [`Io`](https://docs.rs/kcp-peer/latest/kcp_peer/enum.Error.html#variant.Io) | UDP socket bind / send / recv failure | Usually fatal; check address/port |
 
-### Observing disconnections via events
+### Observing lifecycle via events
 
 Subscribe to the event channel to be notified when sessions are established
-or closed:
+or closed. Data is read separately via [`recv()`](KcpPeer::recv).
 
 ```rust,no_run
 # use kcp_peer::{KcpPeer, KcpConfig, Event};
 # async fn example() {
 # let peer = KcpPeer::bind_with("127.0.0.1:0", KcpConfig::default()).await.unwrap();
-let mut rx = peer.events();
+let mut events = peer.events();
 loop {
-    match rx.recv().await {
+    match events.recv().await {
         Ok(Event::Connected(addr)) => println!("connected {addr}"),
         Ok(Event::Disconnected(addr)) => println!("disconnected {addr}"),
         Ok(Event::PeerRestarted(addr)) => println!("peer {addr} restarted, reconnecting"),
-        Ok(Event::Data(addr, data)) => println!("{data:?} from {addr}"),
         Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
             eprintln!("dropped {n} events — consumer too slow");
         }
@@ -277,6 +283,7 @@ mid-execution never leaves internal state inconsistent or leaks resources:
 |-----|---------------|
 | `bind_with()` | Only one await (`UdpSocket::bind`); cancellation before completion creates no state. |
 | `send()` | Session is created and inserted into the map in synchronous code after the only await point. If cancelled during `initiate_session`, no session record is created. |
+| `recv()` | Pops from a `Mutex<VecDeque>` (sync), then awaits `Notify` or `shutdown`. Dropping the future mid-wait does not consume data — the next `recv()` call returns it. |
 | `shutdown()` | RESET packets are sent synchronously before the first await. The cancellation token is already fired when the await runs, so background tasks still exit promptly. |
 | `events()` → `recv()` | `broadcast::Receiver::recv` is cancel-safe (tokio guarantee). Dropping the future does not consume the event. |
 
@@ -296,7 +303,7 @@ No special combinator usage is required on your side — `tokio::select!`,
 | `maximum_resend_times` | 20 | Max retransmits before dead link |
 | `tick_interval` | 10ms | How often the bg update task runs |
 | `session_timeout` | 60s | Close idle sessions after this duration |
-| `event_channel_capacity` | 1024 | Broadcast channel capacity |
+| `event_channel_capacity` | 1024 | Broadcast channel capacity for lifecycle events |
 | `syn_retry_interval` | 150ms | Base interval for SYN retry exponential backoff |
 | `syn_max_retries` | 5 | Max SYN retransmits before DeadLink (~4.7s total) |
 

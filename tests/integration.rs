@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use kcp_peer::{Event, KcpConfig, KcpPeer};
+use kcp_peer::{DataMessage, Event, KcpConfig, KcpPeer};
 use tokio::time::sleep;
 
 /// Helper: bind two KcpPeers on loopback, ephemeral ports.
@@ -27,8 +27,8 @@ async fn bind_pair() -> (KcpPeer, KcpPeer, SocketAddr, SocketAddr) {
     (a, b, addr_a, addr_b)
 }
 
-/// Wait for up to `timeout` for an event matching a predicate.
-async fn wait_for<F>(
+/// Wait for up to `timeout` for a lifecycle event matching a predicate.
+async fn wait_for_event<F>(
     rx: &mut tokio::sync::broadcast::Receiver<Event>,
     f: F,
     timeout: Duration,
@@ -56,17 +56,36 @@ where
     }
 }
 
+/// Wait for up to `timeout` for a data message matching a predicate.
+async fn wait_for_data<F>(peer: &KcpPeer, f: F, timeout: Duration) -> DataMessage
+where
+    F: Fn(&DataMessage) -> bool,
+{
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let remaining = deadline - tokio::time::Instant::now();
+        if remaining.is_zero() {
+            panic!("timeout waiting for data");
+        }
+        match tokio::time::timeout(remaining, peer.recv()).await {
+            Ok(Ok(msg)) if f(&msg) => return msg,
+            Ok(Ok(_)) => continue,
+            Ok(Err(e)) => panic!("recv error: {e}"),
+            Err(_) => panic!("timeout waiting for data"),
+        }
+    }
+}
+
 #[tokio::test]
 async fn basic_send_recv() {
     let (a, b, addr_a, addr_b) = bind_pair().await;
-    let mut events_a = a.events();
     let mut events_b = b.events();
 
     // A initiates to B with data
     a.send(addr_b, b"hello").await.expect("A→B send");
 
     // B gets Connected, then Data
-    let connected = wait_for(
+    let connected = wait_for_event(
         &mut events_b,
         |e| matches!(e, Event::Connected(_)),
         Duration::from_secs(5),
@@ -74,75 +93,39 @@ async fn basic_send_recv() {
     .await;
     assert!(matches!(connected, Event::Connected(_)));
 
-    let data = wait_for(
-        &mut events_b,
-        |e| matches!(e, Event::Data(..)),
-        Duration::from_secs(5),
-    )
-    .await;
-    match data {
-        Event::Data(addr, msg) => {
-            assert_eq!(addr, addr_a, "B: data from A's address");
-            assert_eq!(&msg[..], b"hello");
-        }
-        _ => unreachable!(),
-    }
+    let data = wait_for_data(&b, |m| m.peer == addr_a && m.data[..] == *b"hello", Duration::from_secs(5)).await;
+    assert_eq!(data.peer, addr_a);
+    assert_eq!(&data.data[..], b"hello");
 
     // B responds to A
     b.send(addr_a, b"world").await.expect("B→A send");
 
     // A should get Data from B
-    let data2 = wait_for(
-        &mut events_a,
-        |e| matches!(e, Event::Data(..)),
-        Duration::from_secs(5),
-    )
-    .await;
-    match data2 {
-        Event::Data(addr, msg) => {
-            assert_eq!(addr, addr_b, "A: data from B's address");
-            assert_eq!(&msg[..], b"world");
-        }
-        _ => unreachable!(),
-    }
+    let data2 = wait_for_data(&a, |m| m.peer == addr_b && m.data[..] == *b"world", Duration::from_secs(5)).await;
+    assert_eq!(data2.peer, addr_b);
+    assert_eq!(&data2.data[..], b"world");
 }
 
 #[tokio::test]
 async fn bidirectional() {
     let (a, b, addr_a, addr_b) = bind_pair().await;
-    let mut events_a = a.events();
     let mut events_b = b.events();
 
     // A initiates
     a.send(addr_b, b"from_a").await.expect("A send");
-    let _ = wait_for(
+    let _ = wait_for_event(
         &mut events_b,
         |e| matches!(e, Event::Connected(_)),
         Duration::from_secs(5),
     )
     .await;
-    let _ = wait_for(
-        &mut events_b,
-        |e| matches!(e, Event::Data(..)),
-        Duration::from_secs(5),
-    )
-    .await;
+    let _ = wait_for_data(&b, |_| true, Duration::from_secs(5)).await;
 
     // B sends back immediately
     b.send(addr_a, b"from_b").await.expect("B send");
-    let data = wait_for(
-        &mut events_a,
-        |e| matches!(e, Event::Data(..)),
-        Duration::from_secs(5),
-    )
-    .await;
-    match data {
-        Event::Data(addr, msg) => {
-            assert_eq!(addr, addr_b);
-            assert_eq!(&msg[..], b"from_b");
-        }
-        _ => unreachable!(),
-    }
+    let data = wait_for_data(&a, |m| m.peer == addr_b && m.data[..] == *b"from_b", Duration::from_secs(5)).await;
+    assert_eq!(data.peer, addr_b);
+    assert_eq!(&data.data[..], b"from_b");
 }
 
 #[tokio::test]
@@ -168,18 +151,13 @@ async fn crash_initiator() {
 
     // 1. A sends data, B establishes session with A
     a.send(addr_b, b"before_crash").await.expect("A send");
-    let _ = wait_for(
+    let _ = wait_for_event(
         &mut events_b,
         |e| matches!(e, Event::Connected(_)),
         Duration::from_secs(5),
     )
     .await;
-    let _ = wait_for(
-        &mut events_b,
-        |e| matches!(e, Event::Data(..)),
-        Duration::from_secs(5),
-    )
-    .await;
+    let _ = wait_for_data(&b, |_| true, Duration::from_secs(5)).await;
 
     // 2. A crashes (Drop closes socket + cancels bg tasks)
     drop(a);
@@ -205,7 +183,7 @@ async fn crash_initiator() {
     // 5. B still has A's old session (only 100ms elapsed, timeout is 60s).
     //    A2's SYN from the same address with a different incarnation triggers
     //    crash recovery: PeerRestarted for the old session, then Connected for the new one.
-    let peer_restarted = wait_for(
+    let peer_restarted = wait_for_event(
         &mut events_b,
         |e| matches!(e, Event::PeerRestarted(_)),
         Duration::from_secs(5),
@@ -213,7 +191,7 @@ async fn crash_initiator() {
     .await;
     assert!(matches!(peer_restarted, Event::PeerRestarted(addr) if addr == addr_a));
 
-    let connected = wait_for(
+    let connected = wait_for_event(
         &mut events_b,
         |e| matches!(e, Event::Connected(_)),
         Duration::from_secs(5),
@@ -222,19 +200,9 @@ async fn crash_initiator() {
     assert!(matches!(connected, Event::Connected(addr) if addr == addr_a));
 
     // 6. Data arrives at B
-    let data_ev = wait_for(
-        &mut events_b,
-        |e| matches!(e, Event::Data(..)),
-        Duration::from_secs(5),
-    )
-    .await;
-    match data_ev {
-        Event::Data(addr, msg) => {
-            assert_eq!(addr, addr_a, "B: data from A's original address");
-            assert_eq!(&msg[..], b"after_crash");
-        }
-        _ => unreachable!(),
-    }
+    let data = wait_for_data(&b, |m| m.peer == addr_a && m.data[..] == *b"after_crash", Duration::from_secs(5)).await;
+    assert_eq!(data.peer, addr_a);
+    assert_eq!(&data.data[..], b"after_crash");
 
     drop(a2);
     drop(b);
@@ -247,18 +215,13 @@ async fn crash_receiver() {
 
     // Establish a session
     a.send(addr_b, b"before_crash").await.expect("initial send");
-    let _ = wait_for(
+    let _ = wait_for_event(
         &mut events_b,
         |e| matches!(e, Event::Connected(_)),
         Duration::from_secs(5),
     )
     .await;
-    let _ = wait_for(
-        &mut events_b,
-        |e| matches!(e, Event::Data(..)),
-        Duration::from_secs(5),
-    )
-    .await;
+    let _ = wait_for_data(&b, |_| true, Duration::from_secs(5)).await;
     drop(events_b); // no longer needed
 
     // B "crashes"
@@ -277,7 +240,6 @@ async fn crash_receiver() {
         .await
         .expect("rebind B");
     let addr_b2 = b2.local_addr();
-    let mut events_b2 = b2.events();
     let mut events_a = a.events();
 
     // A initiates a fresh connection to B2's address (application-level reconnect)
@@ -286,7 +248,7 @@ async fn crash_receiver() {
         .expect("send after crash");
 
     // A should get Connected for the new session
-    let _ = wait_for(
+    let _ = wait_for_event(
         &mut events_a,
         |e| matches!(e, Event::Connected(_)),
         Duration::from_secs(5),
@@ -294,18 +256,8 @@ async fn crash_receiver() {
     .await;
 
     // Data arrives at B2
-    let data_ev = wait_for(
-        &mut events_b2,
-        |e| matches!(e, Event::Data(..)),
-        Duration::from_secs(5),
-    )
-    .await;
-    match data_ev {
-        Event::Data(_addr, msg) => {
-            assert_eq!(&msg[..], b"after_crash", "B2 received fresh data");
-        }
-        _ => unreachable!(),
-    }
+    let data = wait_for_data(&b2, |m| m.data[..] == *b"after_crash", Duration::from_secs(5)).await;
+    assert_eq!(&data.data[..], b"after_crash", "B2 received fresh data");
 
     drop(a);
     drop(b2);
@@ -339,7 +291,7 @@ async fn initiator_gets_connected_event() {
     let mut events_a = a.events();
 
     a.send(addr_b, b"hello").await.expect("A send");
-    let connected = wait_for(
+    let connected = wait_for_event(
         &mut events_a,
         |e| matches!(e, Event::Connected(_)),
         Duration::from_secs(5),
@@ -368,7 +320,7 @@ async fn peer_restarted_detection() {
     a.send(addr_b, b"first").await.expect("A send");
 
     // A receives Connected when SYN_ACK arrives (handshake complete)
-    let _ = wait_for(
+    let _ = wait_for_event(
         &mut events_a,
         |e| matches!(e, Event::Connected(_)),
         Duration::from_secs(5),
@@ -376,18 +328,13 @@ async fn peer_restarted_detection() {
     .await;
 
     // B receives Connected + Data
-    let _ = wait_for(
+    let _ = wait_for_event(
         &mut events_b,
         |e| matches!(e, Event::Connected(_)),
         Duration::from_secs(5),
     )
     .await;
-    let _ = wait_for(
-        &mut events_b,
-        |e| matches!(e, Event::Data(..)),
-        Duration::from_secs(5),
-    )
-    .await;
+    let _ = wait_for_data(&b, |_| true, Duration::from_secs(5)).await;
     drop(events_b);
 
     // 2. B crashes
@@ -403,7 +350,7 @@ async fn peer_restarted_detection() {
     b2.send(addr_a, b"after_restart").await.expect("B2 send");
 
     // 5. A detects crash: old Established session for B's address → PeerRestarted
-    let peer_restarted = wait_for(
+    let peer_restarted = wait_for_event(
         &mut events_a,
         |e| matches!(e, Event::PeerRestarted(_)),
         Duration::from_secs(5),
@@ -412,7 +359,7 @@ async fn peer_restarted_detection() {
     assert!(matches!(peer_restarted, Event::PeerRestarted(addr) if addr == addr_b));
 
     // 6. New session established → Connected
-    let connected = wait_for(
+    let connected = wait_for_event(
         &mut events_a,
         |e| matches!(e, Event::Connected(_)),
         Duration::from_secs(5),
@@ -421,19 +368,9 @@ async fn peer_restarted_detection() {
     assert!(matches!(connected, Event::Connected(addr) if addr == addr_b));
 
     // 7. Data from B2 arrives at A
-    let data = wait_for(
-        &mut events_a,
-        |e| matches!(e, Event::Data(..)),
-        Duration::from_secs(5),
-    )
-    .await;
-    match data {
-        Event::Data(addr, msg) => {
-            assert_eq!(addr, addr_b);
-            assert_eq!(&msg[..], b"after_restart");
-        }
-        _ => unreachable!(),
-    }
+    let data = wait_for_data(&a, |m| m.peer == addr_b && m.data[..] == *b"after_restart", Duration::from_secs(5)).await;
+    assert_eq!(data.peer, addr_b);
+    assert_eq!(&data.data[..], b"after_restart");
 
     drop(a);
     drop(b2);
@@ -450,31 +387,21 @@ async fn simultaneous_handshake() {
     b.send(addr_a, b"from_b").await.expect("B send");
 
     // Both should get Connected and Data
-    let _ = wait_for(
+    let _ = wait_for_event(
         &mut events_a,
         |e| matches!(e, Event::Connected(_)),
         Duration::from_secs(5),
     )
     .await;
-    let _ = wait_for(
+    let _ = wait_for_event(
         &mut events_b,
         |e| matches!(e, Event::Connected(_)),
         Duration::from_secs(5),
     )
     .await;
 
-    let _ = wait_for(
-        &mut events_a,
-        |e| matches!(e, Event::Data(..)),
-        Duration::from_secs(5),
-    )
-    .await;
-    let _ = wait_for(
-        &mut events_b,
-        |e| matches!(e, Event::Data(..)),
-        Duration::from_secs(5),
-    )
-    .await;
+    let _ = wait_for_data(&a, |_| true, Duration::from_secs(5)).await;
+    let _ = wait_for_data(&b, |_| true, Duration::from_secs(5)).await;
 }
 
 #[tokio::test]
@@ -497,21 +424,16 @@ async fn session_timeout() {
     let mut events_b = b.events();
 
     a.send(addr_b, b"hi").await.expect("send");
-    let _ = wait_for(
+    let _ = wait_for_event(
         &mut events_b,
         |e| matches!(e, Event::Connected(_)),
         Duration::from_secs(5),
     )
     .await;
-    let _ = wait_for(
-        &mut events_b,
-        |e| matches!(e, Event::Data(..)),
-        Duration::from_secs(5),
-    )
-    .await;
+    let _ = wait_for_data(&b, |_| true, Duration::from_secs(5)).await;
 
     // Stop sending; after timeout, B should prune the session
-    let _ = wait_for(
+    let _ = wait_for_event(
         &mut events_b,
         |e| matches!(e, Event::Disconnected(_)),
         Duration::from_secs(5),
@@ -548,32 +470,22 @@ async fn multiple_peers() {
     let mut events_c = c.events();
 
     a.send(addr_b, b"a_to_b").await.expect("A→B");
-    let _ = wait_for(
+    let _ = wait_for_event(
         &mut events_b,
         |e| matches!(e, Event::Connected(_)),
         Duration::from_secs(5),
     )
     .await;
-    let _ = wait_for(
-        &mut events_b,
-        |e| matches!(e, Event::Data(..)),
-        Duration::from_secs(5),
-    )
-    .await;
+    let _ = wait_for_data(&b, |_| true, Duration::from_secs(5)).await;
 
     a.send(addr_c, b"a_to_c").await.expect("A→C");
-    let _ = wait_for(
+    let _ = wait_for_event(
         &mut events_c,
         |e| matches!(e, Event::Connected(_)),
         Duration::from_secs(5),
     )
     .await;
-    let _ = wait_for(
-        &mut events_c,
-        |e| matches!(e, Event::Data(..)),
-        Duration::from_secs(5),
-    )
-    .await;
+    let _ = wait_for_data(&c, |_| true, Duration::from_secs(5)).await;
 
     drop(a);
     drop(b);
@@ -588,25 +500,15 @@ async fn large_message() {
     let payload = vec![0xABu8; 15_000];
     a.send(addr_b, &payload).await.expect("send large");
 
-    let _ = wait_for(
+    let _ = wait_for_event(
         &mut events_b,
         |e| matches!(e, Event::Connected(_)),
         Duration::from_secs(5),
     )
     .await;
-    let data = wait_for(
-        &mut events_b,
-        |e| matches!(e, Event::Data(..)),
-        Duration::from_secs(5),
-    )
-    .await;
-    match data {
-        Event::Data(_addr, msg) => {
-            assert_eq!(msg.len(), 15_000, "large message size");
-            assert_eq!(&msg[..], &payload[..], "large message content");
-        }
-        _ => unreachable!(),
-    }
+    let data = wait_for_data(&b, |m| m.data.len() == 15_000, Duration::from_secs(5)).await;
+    assert_eq!(data.data.len(), 15_000, "large message size");
+    assert_eq!(&data.data[..], &payload[..], "large message content");
 
     drop(a);
     drop(b);
@@ -618,16 +520,11 @@ async fn reconnect() {
     let mut events_b = b.events();
 
     a.send(addr_b, b"first").await.expect("first send");
-    let _ = wait_for(
-        &mut events_b,
-        |e| matches!(e, Event::Data(..)),
-        Duration::from_secs(5),
-    )
-    .await;
+    let _ = wait_for_data(&b, |m| m.data[..] == *b"first", Duration::from_secs(5)).await;
 
     // Disconnect on A — sends RESET to B so B immediately closes the session.
     a.disconnect(addr_b);
-    let _ = wait_for(
+    let _ = wait_for_event(
         &mut events_b,
         |e| matches!(e, Event::Disconnected(_)),
         Duration::from_secs(5),
@@ -640,18 +537,8 @@ async fn reconnect() {
     // B's session was already removed by the RESET, so this is a normal
     // handshake (not crash recovery).
     a.send(addr_b, b"second").await.expect("reconnect send");
-    let data = wait_for(
-        &mut events_b,
-        |e| matches!(e, Event::Data(..)),
-        Duration::from_secs(5),
-    )
-    .await;
-    match data {
-        Event::Data(_addr, msg) => {
-            assert_eq!(&msg[..], b"second", "reconnected message");
-        }
-        _ => unreachable!(),
-    }
+    let data = wait_for_data(&b, |m| m.data[..] == *b"second", Duration::from_secs(5)).await;
+    assert_eq!(&data.data[..], b"second", "reconnected message");
 
     drop(a);
     drop(b);
@@ -675,17 +562,11 @@ async fn dead_link() {
         .await
         .expect("bind B");
     let addr_b = b.local_addr();
-    let mut events_b = b.events();
     let mut events_a = a.events();
 
     // Establish session — wait for data delivery to confirm Established + data flowed
     a.send(addr_b, b"ping").await.expect("first send");
-    let _ = wait_for(
-        &mut events_b,
-        |e| matches!(e, Event::Data(..)),
-        Duration::from_secs(15),
-    )
-    .await;
+    let _ = wait_for_data(&b, |_| true, Duration::from_secs(15)).await;
 
     // Drop B (Drop impl cancels bg tasks, socket closes). Brief pause for cleanup.
     drop(b);
@@ -694,7 +575,7 @@ async fn dead_link() {
     // Send data after B is gone — never ACKed → retransmissions exhaust → dead link
     let _ = a.send(addr_b, b"trigger").await;
 
-    let _ = wait_for(
+    let _ = wait_for_event(
         &mut events_a,
         |e| matches!(e, Event::Disconnected(_)),
         Duration::from_secs(15),
@@ -715,7 +596,7 @@ async fn many_small_messages() {
         a.send(addr_b, &msg).await.expect("send small");
     }
 
-    let _ = wait_for(
+    let _ = wait_for_event(
         &mut events_b,
         |e| matches!(e, Event::Connected(_)),
         Duration::from_secs(5),
@@ -729,19 +610,13 @@ async fn many_small_messages() {
         if remaining.is_zero() {
             panic!("timed out after {received}/{count} messages");
         }
-        match tokio::time::timeout(remaining, events_b.recv()).await {
-            Ok(Ok(Event::Data(_addr, msg))) => {
-                assert_eq!(msg.len(), 1, "message {} size", received);
-                assert_eq!(msg[0], received as u8, "message {} content", received);
+        match tokio::time::timeout(remaining, b.recv()).await {
+            Ok(Ok(msg)) => {
+                assert_eq!(msg.data.len(), 1, "message {} size", received);
+                assert_eq!(msg.data[0], received as u8, "message {} content", received);
                 received += 1;
             }
-            Ok(Ok(_)) => continue,
-            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(n))) => {
-                panic!("event channel lagged by {n}");
-            }
-            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
-                panic!("event channel closed");
-            }
+            Ok(Err(e)) => panic!("recv error: {e}"),
             Err(_) => panic!("timed out after {received}/{count} messages"),
         }
     }
@@ -764,7 +639,7 @@ async fn concurrent_send_to_unknown_peer() {
     r1.expect("send1");
     r2.expect("send2");
 
-    let _ = wait_for(
+    let _ = wait_for_event(
         &mut events_b,
         |e| matches!(e, Event::Connected(_)),
         Duration::from_secs(5),
@@ -773,16 +648,11 @@ async fn concurrent_send_to_unknown_peer() {
 
     let mut received = Vec::new();
     for _ in 0..2 {
-        let data = wait_for(
-            &mut events_b,
-            |e| matches!(e, Event::Data(..)),
-            Duration::from_secs(5),
-        )
-        .await;
-        match data {
-            Event::Data(_, msg) => received.push(msg.to_vec()),
-            _ => unreachable!(),
-        }
+        let data = tokio::time::timeout(Duration::from_secs(5), b.recv())
+            .await
+            .expect("timeout")
+            .expect("recv error");
+        received.push(data.data.to_vec());
     }
     received.sort();
     assert_eq!(received, vec![b"msg1".to_vec(), b"msg2".to_vec()]);

@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use kcp_peer::{Event, KcpConfig, KcpPeer};
+use kcp_peer::{KcpConfig, KcpPeer};
 
 const PORTS: &[u16] = &[9879, 9880, 9881];
 
@@ -40,15 +40,13 @@ async fn new_node(port: u16, config: KcpConfig) -> KcpPeer {
 }
 
 async fn accept_loop(node: KcpPeer, id: usize) {
-    let mut events = node.events();
     loop {
-        match events.recv().await {
-            Ok(Event::Data(_peer, data)) => {
-                let msg = String::from_utf8_lossy(&data);
-                println!("node{id}: received \"{msg}\"");
+        match node.recv().await {
+            Ok(msg) => {
+                let msg_str = String::from_utf8_lossy(&msg.data);
+                println!("node{id}: received \"{msg_str}\"");
             }
-            Ok(Event::Disconnected(_)) | Err(_) => break,
-            _ => {}
+            Err(_) => break,
         }
     }
     println!("node{id}: done");

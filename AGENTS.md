@@ -20,17 +20,16 @@ No CI, no rustfmt/clippy config, no rust-toolchain. Tests are `#[tokio::test]`; 
 
 | File | Role |
 |------|------|
-| `src/transport.rs` | `KcpPeer`, `Event`, receive/update background tasks, session map |
+| `src/transport.rs` | `KcpPeer`, `Event`, `DataMessage`, `recv()`, receive/update background tasks, session map |
 | `src/session.rs` | Session state machine (SynSent → Established → removed) |
 | `src/config.rs` | `KcpConfig` builder |
 | `src/packet.rs` | Wire packet types (SYN, SYN_ACK, KCP_DATA, RESET) |
 | `src/error.rs` | `Error` enum |
 | `src/lib.rs` | Public re-exports only |
-| `tests/integration.rs` | All 13 integration tests |
+| `tests/integration.rs` | All 14 integration tests |
 
 ## Gotchas
 
-- **`Data` events only fire when `receiver_count() > 0`.** Subscribe to `events()` *before* sending data to avoid missing events.
 - **All public async APIs are cancel-safe.** `tokio::select!`, `spawn`, `.await` all work safely.
 - **`send()` to unknown peer auto-initiates handshake.** Data is buffered in KCP until Established. If handshake fails, buffered data is dropped silently — caller sees `Event::Disconnected`.
 - **Crash recovery** uses random incarnation numbers. A peer restarting on the same `SocketAddr` triggers `PeerRestarted` on the remote side, then `Connected`.

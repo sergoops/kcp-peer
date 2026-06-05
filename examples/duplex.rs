@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use kcp_peer::{Event, KcpConfig, KcpPeer};
+use kcp_peer::{KcpConfig, KcpPeer};
 
 #[tokio::main]
 async fn main() {
@@ -15,18 +15,15 @@ async fn main() {
         .await
         .expect("bind server");
 
-    let mut events = server.events();
-
     tokio::spawn(async move {
         loop {
-            match events.recv().await {
-                Ok(Event::Data(addr, data)) => {
-                    let msg = String::from_utf8_lossy(&data);
-                    println!("server: received \"{msg}\"");
-                    let _ = server.send(addr, &data).await;
+            match server.recv().await {
+                Ok(msg) => {
+                    let msg_str = String::from_utf8_lossy(&msg.data);
+                    println!("server: received \"{msg_str}\"");
+                    let _ = server.send(msg.peer, &msg.data).await;
                 }
-                Ok(Event::Disconnected(_)) | Err(_) => break,
-                _ => {}
+                Err(_) => break,
             }
         }
         println!("server: done");
@@ -38,7 +35,6 @@ async fn main() {
         .await
         .expect("bind client");
 
-    let mut client_events = client.events();
     let server_addr = "127.0.0.1:9877".parse().unwrap();
 
     for msg in &["hello", "world", "from", "client"] {
@@ -50,12 +46,11 @@ async fn main() {
     }
 
     for _ in 0..4 {
-        match tokio::time::timeout(Duration::from_secs(5), client_events.recv()).await {
-            Ok(Ok(Event::Data(_, data))) => {
-                println!("client: got \"{}\"", String::from_utf8_lossy(&data));
+        match tokio::time::timeout(Duration::from_secs(5), client.recv()).await {
+            Ok(Ok(msg)) => {
+                println!("client: got \"{}\"", String::from_utf8_lossy(&msg.data));
             }
-            Ok(Ok(_)) => continue,
-            Ok(Err(_)) | Err(_) => panic!("timeout or channel closed"),
+            _ => panic!("timeout or channel closed"),
         }
     }
 
