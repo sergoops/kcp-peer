@@ -17,14 +17,12 @@ pub struct KcpConfig {
     pub rx_minrto: u32,
     /// Fast resend threshold (set_fast_resend).
     pub fast_resend: u32,
+    /// Max retransmissions before marking connection as dead (set_maximum_resend_times).
+    pub maximum_resend_times: u32,
     /// How often the background tick drives KCP update.
     pub tick_interval: Duration,
     /// Close idle sessions after this duration.
     pub session_timeout: Duration,
-    /// Max handshake retries before giving up.
-    pub handshake_retries: u32,
-    /// Timeout for a single handshake attempt.
-    pub handshake_timeout: Duration,
     /// Capacity of the broadcast event channel.
     pub event_channel_capacity: usize,
 }
@@ -38,10 +36,9 @@ impl Default for KcpConfig {
             rcv_wnd: 128,
             rx_minrto: 10,
             fast_resend: 1,
+            maximum_resend_times: 20,
             tick_interval: Duration::from_millis(10),
             session_timeout: Duration::from_secs(60),
-            handshake_retries: 5,
-            handshake_timeout: Duration::from_secs(5),
             event_channel_capacity: 1024,
         }
     }
@@ -55,6 +52,7 @@ impl KcpConfig {
         kcp.set_wndsize(self.snd_wnd, self.rcv_wnd);
         kcp.set_rx_minrto(self.rx_minrto);
         kcp.set_fast_resend(self.fast_resend);
+        kcp.set_maximum_resend_times(self.maximum_resend_times);
         kcp.set_interval(self.kcp_interval_ms);
     }
 
@@ -99,6 +97,11 @@ impl KcpConfigBuilder {
         self
     }
 
+    pub fn maximum_resend_times(mut self, v: u32) -> Self {
+        self.0.maximum_resend_times = v;
+        self
+    }
+
     pub fn tick_interval(mut self, v: Duration) -> Self {
         self.0.tick_interval = v;
         self
@@ -106,16 +109,6 @@ impl KcpConfigBuilder {
 
     pub fn session_timeout(mut self, v: Duration) -> Self {
         self.0.session_timeout = v;
-        self
-    }
-
-    pub fn handshake_retries(mut self, v: u32) -> Self {
-        self.0.handshake_retries = v;
-        self
-    }
-
-    pub fn handshake_timeout(mut self, v: Duration) -> Self {
-        self.0.handshake_timeout = v;
         self
     }
 

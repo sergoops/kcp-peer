@@ -2,7 +2,7 @@ use std::io::{self, Write};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Instant, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
 use atomic_waker::AtomicWaker;
 use bytes::BytesMut;
@@ -47,9 +47,9 @@ pub struct SessionInner {
 }
 
 /// Session state machine.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionState {
-    SynSent { retries: u32, deadline: Instant },
+    SynSent,
     Established,
     Closing,
 }
@@ -81,7 +81,6 @@ impl Session {
         socket: Arc<UdpSocket>,
         _incarnation: u64,
         config: &KcpConfig,
-        now: Instant,
     ) -> Result<Arc<Self>> {
         let output = DirectOutput {
             socket: socket.clone(),
@@ -99,10 +98,7 @@ impl Session {
         let inner = SessionInner {
             kcp,
             conv_id,
-            state: SessionState::SynSent {
-                retries: 0,
-                deadline: now + config.handshake_timeout,
-            },
+            state: SessionState::SynSent,
             incarnation: _incarnation,
             recv_buf: BytesMut::new(),
         };

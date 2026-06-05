@@ -3,7 +3,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use bytes::Bytes;
 use rand::Rng;
@@ -139,7 +139,6 @@ impl KcpPeer {
             self.socket.clone(),
             self.incarnation,
             &self.get_config(),
-            Instant::now(),
         ).await?;
 
         let can = canonicalize(peer);
@@ -384,7 +383,7 @@ async fn handle_incoming(
                         let old_conv = inner.conv_id;
                         if old_conv == conv {
                             SynAction::Ignore
-                        } else if matches!(inner.state, SessionState::SynSent { .. }) {
+                        } else if matches!(inner.state, SessionState::SynSent) {
                             // Simultaneous handshake — tie-break by address.
                             if from > my_addr {
                                 // We lose — adopt peer's conv_id
@@ -446,7 +445,7 @@ async fn handle_incoming(
             let map = sessions.read().unwrap();
             if let Some(s) = map.get(&can) {
                 let mut inner = s.inner.lock().unwrap();
-                if let SessionState::SynSent { .. } = inner.state {
+                if let SessionState::SynSent = inner.state {
                     if inner.conv_id == conv {
                         inner.state = SessionState::Established;
                         s.last_rx.store(epoch_ms(), Ordering::Release);
