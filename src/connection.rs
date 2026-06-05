@@ -8,8 +8,15 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use crate::error::Error;
 use crate::session::Session;
 
-/// Handle wrapping a peer session that implements AsyncRead + AsyncWrite.
-/// Composes with tokio framing utilities (Framed, LengthDelimitedCodec, etc.).
+/// A handle to a single peer session implementing `AsyncRead` + `AsyncWrite`.
+///
+/// Obtained via [`KcpPeer::connect`](crate::KcpPeer::connect). Composes with tokio framing
+/// utilities such as `Framed`, `LengthDelimitedCodec`, etc.
+///
+/// # Note
+/// When event subscribers exist on the [`KcpPeer`](crate::KcpPeer), incoming data is drained
+/// into [`Event::Data`](crate::Event::Data) and `poll_read` returns `Pending`.
+/// To read via `KcpConnection`, avoid subscribing to events, or read data from events instead.
 #[derive(Debug, Clone)]
 pub struct KcpConnection {
     pub(crate) session: Arc<Session>,
@@ -20,7 +27,7 @@ impl KcpConnection {
         Self { session }
     }
 
-    /// Unwrap and get back the Arc<Session>.
+    /// Consume the connection and return the underlying `Arc<Session>`.
     pub fn into_inner(self) -> Arc<Session> {
         self.session
     }

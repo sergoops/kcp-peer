@@ -17,16 +17,30 @@ use crate::error::Result;
 use crate::packet::{self, PacketType};
 use crate::session::{self, epoch_ms, Session, SessionState};
 
-/// Events produced by KcpPeer.
+/// Events produced by [`KcpPeer`].
+///
+/// Delivered via a `tokio::sync::broadcast` channel. Subscribe with [`KcpPeer::events`].
 #[derive(Debug, Clone)]
 pub enum Event {
     /// Application data received from a peer.
+    ///
+    /// Only emitted when `receiver_count() > 0`. When no event subscribers exist,
+    /// [`KcpConnection::poll_read`](crate::KcpConnection) reads directly from KCP.
     Data(SocketAddr, Bytes),
-    /// Handshake completed; session is ready.
+    /// Handshake completed or inbound connection accepted.
+    ///
+    /// For the outbound side this fires when SYN_ACK arrives (session → `Established`).
+    /// For the inbound side it fires when the SYN is processed.
     Connected(SocketAddr),
-    /// Session closed (timeout, disconnect, or peer restarted).
+    /// Session closed.
+    ///
+    /// Fires on session timeout, receiving a RESET packet, or explicit [`KcpPeer::disconnect`].
     Disconnected(SocketAddr),
-    /// Peer restarted — old session was force-replaced.
+    /// Peer restarted — old session was force-replaced by a new incarnation.
+    ///
+    /// Fires when a SYN arrives from an address with an existing `Established` session
+    /// but a different incarnation (random ID generated on bind). Always followed by
+    /// [`Connected`](Event::Connected) for the new session.
     PeerRestarted(SocketAddr),
 }
 
@@ -35,8 +49,11 @@ pub type EventReceiver = broadcast::Receiver<Event>;
 
 /// A symmetric P2P transport over a single UDP socket.
 ///
-/// Each peer is identified by its `SocketAddr`. At most one session per peer.
-/// Sessions are auto-created on first `send()` or incoming SYN.
+/// Each remote peer is identified by its `SocketAddr`. At most one session per peer.
+/// Sessions are auto-created on first [`send`](KcpPeer::send) or incoming SYN.
+/// Background receive and update tasks are spawned on bind and cancelled on drop.
+///
+/// Clone-friendly (internally `Arc`-based).
 pub struct KcpPeer {
     pub(crate) socket: Arc<UdpSocket>,
     pub(crate) sessions: Arc<std::sync::RwLock<HashMap<CanonicalAddr, Arc<Session>>>>,
@@ -65,12 +82,16 @@ impl std::fmt::Debug for KcpPeer {
 }
 
 impl KcpPeer {
-    /// Bind to a local address with default config.
+    /// Bind to a local address with the default [`KcpConfig`].
+    ///
+    /// Spawns the background receive and update tasks.
     pub async fn bind(addr: impl tokio::net::ToSocketAddrs) -> Result<Self> {
         Self::bind_with(addr, KcpConfig::default()).await
     }
 
-    /// Bind to a local address with the given config.
+    /// Bind to a local address with the given [`KcpConfig`].
+    ///
+    /// Each bind generates a random incarnation number used for crash detection.
     pub async fn bind_with(
         addr: impl tokio::net::ToSocketAddrs,
         config: KcpConfig,
@@ -118,7 +139,10 @@ impl KcpPeer {
         self.local_addr
     }
 
-    /// Send data to a peer. Auto-initiates a handshake if no session exists.
+    /// Send data to a peer.
+    ///
+    /// Auto-initiates a handshake (SYN) if no session exists for this peer.
+    /// Data is queued immediately and flushed once the session is established.
     pub async fn send(&self, peer: SocketAddr, data: &[u8]) -> Result<()> {
         let can = canonicalize(peer);
 
@@ -136,7 +160,10 @@ impl KcpPeer {
         }
     }
 
-    /// Initiate (or return existing) connection to a peer. Idempotent.
+    /// Initiate (or return existing) connection to a peer.
+    ///
+    /// Idempotent — returns the existing `KcpConnection` if the session already exists.
+    /// The returned handle implements `AsyncRead` + `AsyncWrite` for use with tokio I/O utilities.
     pub async fn connect(&self, peer: SocketAddr) -> Result<KcpConnection> {
         let can = canonicalize(peer);
 
@@ -172,11 +199,15 @@ impl KcpPeer {
     }
 
     /// Subscribe to transport events.
+    ///
+    /// Returns a `tokio::sync::broadcast::Receiver`. Each subscriber gets all events
+    /// from the point of subscription onward. Events include [`Connected`](Event::Connected),
+    /// [`Disconnected`](Event::Disconnected), [`Data`](Event::Data), and [`PeerRestarted`](Event::PeerRestarted).
     pub fn events(&self) -> EventReceiver {
         self.event_tx.subscribe()
     }
 
-    /// List all connected peers.
+    /// List all connected peers (filters out closed sessions).
     pub fn peers(&self) -> Vec<SocketAddr> {
         self.sessions
             .read()
@@ -187,7 +218,9 @@ impl KcpPeer {
             .collect()
     }
 
-    /// Stats for a specific peer.
+    /// KCP statistics for a specific peer session.
+    ///
+    /// Returns `None` if the peer has no active session.
     pub fn stats(&self, peer: SocketAddr) -> Option<PeerStats> {
         let map = self.sessions.read().unwrap();
         let s = map.get(&canonicalize(peer))?;
@@ -207,6 +240,8 @@ impl KcpPeer {
     }
 
     /// Force close a session with a peer.
+    ///
+    /// Removes the session and fires [`Event::Disconnected`].
     pub fn disconnect(&self, peer: SocketAddr) {
         let can = canonicalize(peer);
         if let Some(s) = self.sessions.write().unwrap().remove(&can) {
@@ -216,6 +251,10 @@ impl KcpPeer {
     }
 
     /// Gracefully shut down, sending RESET to all peers.
+    ///
+    /// Cancels background tasks, sends a RESET packet to each active peer,
+    /// and awaits task completion. On drop (without calling `shutdown`),
+    /// tasks are cancelled but no RESET packets are sent.
     pub async fn shutdown(mut self) {
         self.shutdown.cancel();
         // send RESET to all active sessions
@@ -238,12 +277,19 @@ impl KcpPeer {
 /// Per-peer connection statistics.
 #[derive(Debug, Clone)]
 pub struct PeerStats {
+    /// KCP conversation ID for this session.
     pub conv_id: u32,
+    /// Local send window size (segments).
     pub send_wnd: u32,
+    /// Local receive window size (segments).
     pub recv_wnd: u32,
+    /// Remote peer's advertised window size.
     pub rmt_wnd: u32,
+    /// Number of segments waiting to be sent (in-flight + queued).
     pub wait_snd: usize,
+    /// Whether KCP has declared the connection dead (retransmission exhausted).
     pub dead_link: bool,
+    /// Time elapsed since the last packet was received from this peer.
     pub elapsed: Duration,
 }
 

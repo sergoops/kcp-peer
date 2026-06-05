@@ -3,27 +3,36 @@ use std::time::Duration;
 use kcp::Kcp;
 
 /// P2P-oriented KCP configuration.
+///
+/// Create via [`KcpConfigBuilder`] (obtained from [`KcpConfig::builder`]).
 #[derive(Debug, Clone)]
 pub struct KcpConfig {
-    /// Internal update interval in ms (passed to kcp set_interval).
+    /// KCP internal update interval in milliseconds (passed to `kcp_set_interval`).
+    ///
+    /// Controls how frequently KCP checks for retransmission and window updates.
     pub kcp_interval_ms: u32,
-    /// (nodelay, interval, resend, nc) passed directly to kcp set_nodelay.
+    /// `(nodelay, interval, resend, nc)` passed directly to `kcp_set_nodelay`.
+    ///
+    /// `nodelay=2` enables aggressive RTO calculation.
     pub kcp_nodelay: (i32, i32, i32, bool),
-    /// Send window size (segments).
+    /// KCP send window size (segments).
     pub snd_wnd: u16,
-    /// Receive window size (segments).
+    /// KCP receive window size (segments).
     pub rcv_wnd: u16,
-    /// Minimum RTO in ms (set_rx_minrto).
+    /// Minimum RTO in milliseconds.
     pub rx_minrto: u32,
-    /// Fast resend threshold (set_fast_resend).
+    /// Fast retransmission threshold (number of duplicate ACKs).
     pub fast_resend: u32,
-    /// Max retransmissions before marking connection as dead (set_maximum_resend_times).
+    /// Maximum retransmissions before [`DeadLink`](crate::Error::DeadLink) is reported.
     pub maximum_resend_times: u32,
-    /// How often the background tick drives KCP update.
+    /// How often the background update task drives KCP updates.
     pub tick_interval: Duration,
-    /// Close idle sessions after this duration.
+    /// Close sessions that have been idle (no incoming packets) for this duration.
     pub session_timeout: Duration,
-    /// Capacity of the broadcast event channel.
+    /// Capacity of the `tokio::sync::broadcast` event channel.
+    ///
+    /// If subscribers are slower than the event rate, old events are dropped.
+    /// Check [`Event::EventChannelLagged`](crate::Error::EventChannelLagged).
     pub event_channel_capacity: usize,
 }
 

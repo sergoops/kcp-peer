@@ -13,8 +13,9 @@ use crate::config::KcpConfig;
 use crate::error::{Error, Result};
 use crate::packet::{self, PacketType};
 
-/// Output that writes KCP frames directly to the UDP socket.
-/// On `WouldBlock` the bytes are silently dropped — KCP retransmission handles it.
+/// KCP output adapter that writes frames directly to a UDP socket.
+///
+/// On `WouldBlock` the bytes are silently dropped — KCP retransmission guarantees delivery.
 pub struct DirectOutput {
     pub socket: Arc<UdpSocket>,
     pub peer: SocketAddr,

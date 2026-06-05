@@ -1,11 +1,16 @@
 use bytes::BytesMut;
 
+/// Wire-protocol packet types for the kcp-peer handshake layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum PacketType {
+    /// Raw KCP protocol data (the payload is a standard KCP segment).
     KcpData = 0,
+    /// Handshake initiation (SYN).
     Syn = 1,
+    /// Handshake acknowledgment (SYN-ACK).
     SynAck = 2,
+    /// Session termination notification — tells the receiver to close the session.
     Reset = 3,
 }
 
