@@ -206,14 +206,14 @@ async fn crash_initiator() {
 
     // 5. B still has A's old session (only 100ms elapsed, timeout is 60s).
     //    A2's SYN from the same address with a different incarnation triggers
-    //    crash recovery: PeerReset for the old session, then Connected for the new one.
-    let peer_reset = wait_for(
+    //    crash recovery: PeerRestarted for the old session, then Connected for the new one.
+    let peer_restarted = wait_for(
         &mut events_b,
-        |e| matches!(e, Event::PeerReset(_)),
+        |e| matches!(e, Event::PeerRestarted(_)),
         Duration::from_secs(5),
     )
     .await;
-    assert!(matches!(peer_reset, Event::PeerReset(addr) if addr == addr_a));
+    assert!(matches!(peer_restarted, Event::PeerRestarted(addr) if addr == addr_a));
 
     let connected = wait_for(
         &mut events_b,
@@ -313,7 +313,7 @@ async fn crash_receiver() {
     drop(b2);
 }
 
-// A receives PeerReset when B crashes, restarts on the same address, and
+// A receives PeerRestarted when B crashes, restarts on the same address, and
 // B2 initiates a new connection. A detects the restart via SYN from a
 // previously-Established address with a different incarnation.
 
@@ -354,7 +354,7 @@ async fn initiator_gets_connected_event() {
 }
 
 #[tokio::test]
-async fn peer_reset_detection() {
+async fn peer_restarted_detection() {
     let a = KcpPeer::bind_with("127.0.0.1:0", test_config())
         .await
         .expect("bind A");
@@ -407,14 +407,14 @@ async fn peer_reset_detection() {
         .await
         .expect("B2 send");
 
-    // 5. A detects crash: old Established session for B's address → PeerReset
-    let peer_reset = wait_for(
+    // 5. A detects crash: old Established session for B's address → PeerRestarted
+    let peer_restarted = wait_for(
         &mut events_a,
-        |e| matches!(e, Event::PeerReset(_)),
+        |e| matches!(e, Event::PeerRestarted(_)),
         Duration::from_secs(5),
     )
     .await;
-    assert!(matches!(peer_reset, Event::PeerReset(addr) if addr == addr_b));
+    assert!(matches!(peer_restarted, Event::PeerRestarted(addr) if addr == addr_b));
 
     // 6. New session established → Connected
     let connected = wait_for(

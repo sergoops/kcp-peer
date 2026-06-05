@@ -31,8 +31,8 @@ async fn main() {
                 Ok(Event::Disconnected(addr)) => {
                     println!("server: disconnected {addr}");
                 }
-                Ok(Event::PeerReset(addr)) => {
-                    println!("server: peer reset {addr}");
+                Ok(Event::PeerRestarted(addr)) => {
+                    println!("server: peer restarted {addr}");
                 }
                 Err(_) => break,
             }

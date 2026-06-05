@@ -24,10 +24,10 @@ pub enum Event {
     Data(SocketAddr, Bytes),
     /// Handshake completed; session is ready.
     Connected(SocketAddr),
-    /// Session closed (timeout, disconnect, or peer reset).
+    /// Session closed (timeout, disconnect, or peer restarted).
     Disconnected(SocketAddr),
     /// Peer restarted — old session was force-replaced.
-    PeerReset(SocketAddr),
+    PeerRestarted(SocketAddr),
 }
 
 /// Receiver for [`Event`]s. Clone the broadcast receiver.
@@ -463,7 +463,7 @@ async fn handle_incoming(
                             SynAction::KeepExisting
                         } else {
                             session.mark_closed();
-                            let _ = event_tx.send(Event::PeerReset(from));
+                            let _ = event_tx.send(Event::PeerRestarted(from));
                             SynAction::CreateNew
                         }
                     }
