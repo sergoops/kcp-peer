@@ -52,6 +52,22 @@ impl KcpConnection {
     pub fn into_inner(self) -> Arc<Session> {
         self.session
     }
+
+    /// Returns `true` if the underlying session has been closed.
+    ///
+    /// A closed connection returns [`ConnectionReset`](std::io::ErrorKind::ConnectionReset)
+    /// from [`poll_read`](tokio::io::AsyncRead::poll_read) and
+    /// [`poll_write`](tokio::io::AsyncWrite::poll_write).
+    pub fn is_closed(&self) -> bool {
+        self.session
+            .closed
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Returns the remote peer's socket address.
+    pub fn peer_addr(&self) -> std::net::SocketAddr {
+        self.session.peer_addr
+    }
 }
 
 impl AsyncRead for KcpConnection {
