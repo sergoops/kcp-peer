@@ -360,12 +360,14 @@ async fn peer_restarted_detection() {
         .await
         .expect("bind B");
     let addr_b = b.local_addr();
+    let addr_a = a.local_addr();
     let mut events_a = a.events();
+    let mut events_b = b.events();
 
     // 1. A → B establishes session, data flows
     a.send(addr_b, b"first").await.expect("A send");
 
-    // A should receive Connected (fired by initiate_session)
+    // A receives Connected when SYN_ACK arrives (handshake complete)
     let _ = wait_for(
         &mut events_a,
         |e| matches!(e, Event::Connected(_)),
@@ -373,8 +375,7 @@ async fn peer_restarted_detection() {
     )
     .await;
 
-    // Confirm data arrived at B too (so session is fully established)
-    let mut events_b = b.events();
+    // B receives Connected + Data
     let _ = wait_for(
         &mut events_b,
         |e| matches!(e, Event::Connected(_)),
@@ -388,8 +389,6 @@ async fn peer_restarted_detection() {
     )
     .await;
     drop(events_b);
-
-    let addr_a = a.local_addr();
 
     // 2. B crashes
     drop(b);

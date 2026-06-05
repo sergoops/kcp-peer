@@ -168,8 +168,6 @@ impl KcpPeer {
             map.insert(can, session.clone());
         }
 
-        let _ = self.event_tx.send(Event::Connected(peer));
-
         Ok(session)
     }
 
