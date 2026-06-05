@@ -520,7 +520,7 @@ async fn dead_link() {
         .tick_interval(Duration::from_millis(10))
         .kcp_interval_ms(10)
         .kcp_nodelay(1, 10, 2, true)
-        .maximum_resend_times(2)
+        .maximum_resend_times(4)
         .rx_minrto(10)
         .fast_resend(1)
         .build();
@@ -532,25 +532,29 @@ async fn dead_link() {
         .await
         .expect("bind B");
     let addr_b = b.local_addr();
+    let mut events_b = b.events();
     let mut events_a = a.events();
 
-    // Establish session
+    // Establish session — wait for data delivery to confirm Established + data flowed
     a.send(addr_b, b"ping").await.expect("first send");
     let _ = wait_for(
-        &mut events_a,
-        |e| matches!(e, Event::Connected(_)),
-        Duration::from_secs(10),
+        &mut events_b,
+        |e| matches!(e, Event::Data(..)),
+        Duration::from_secs(15),
     )
     .await;
 
-    // Drop B — KCP should exhaust retransmissions quickly with max_retransmits=1
+    // Drop B (Drop impl cancels bg tasks, socket closes). Brief pause for cleanup.
     drop(b);
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // Dead link should fire Disconnected
+    // Send data after B is gone — never ACKed → retransmissions exhaust → dead link
+    let _ = a.send(addr_b, b"trigger").await;
+
     let _ = wait_for(
         &mut events_a,
         |e| matches!(e, Event::Disconnected(_)),
-        Duration::from_secs(5),
+        Duration::from_secs(15),
     )
     .await;
 

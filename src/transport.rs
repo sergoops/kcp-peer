@@ -37,7 +37,6 @@ pub type EventReceiver = broadcast::Receiver<Event>;
 ///
 /// Each peer is identified by its `SocketAddr`. At most one session per peer.
 /// Sessions are auto-created on first `send()` or incoming SYN.
-#[derive(Debug)]
 pub struct KcpPeer {
     pub(crate) socket: Arc<UdpSocket>,
     pub(crate) sessions: Arc<std::sync::RwLock<HashMap<CanonicalAddr, Arc<Session>>>>,
@@ -45,9 +44,24 @@ pub struct KcpPeer {
     pub(crate) incarnation: u64,
     pub(crate) shutdown: CancellationToken,
     pub(crate) config: Arc<KcpConfig>,
-    pub(crate) _recv_handle: tokio::task::JoinHandle<()>,
-    pub(crate) _update_handle: tokio::task::JoinHandle<()>,
+    pub(crate) _recv_handle: Option<tokio::task::JoinHandle<()>>,
+    pub(crate) _update_handle: Option<tokio::task::JoinHandle<()>>,
     pub(crate) local_addr: SocketAddr,
+}
+
+impl Drop for KcpPeer {
+    fn drop(&mut self) {
+        self.shutdown.cancel();
+    }
+}
+
+impl std::fmt::Debug for KcpPeer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KcpPeer")
+            .field("local_addr", &self.local_addr)
+            .field("sessions", &self.sessions.read().unwrap().len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl KcpPeer {
@@ -93,8 +107,8 @@ impl KcpPeer {
             incarnation,
             shutdown,
             config,
-            _recv_handle: recv_handle,
-            _update_handle: update_handle,
+            _recv_handle: Some(recv_handle),
+            _update_handle: Some(update_handle),
             local_addr,
         })
     }
@@ -204,7 +218,7 @@ impl KcpPeer {
     }
 
     /// Gracefully shut down, sending RESET to all peers.
-    pub async fn shutdown(self) {
+    pub async fn shutdown(mut self) {
         self.shutdown.cancel();
         // send RESET to all active sessions
         let peers: Vec<Arc<Session>> = self.sessions.read().unwrap().values().cloned().collect();
@@ -214,8 +228,12 @@ impl KcpPeer {
             let reset = packet::encode_control(PacketType::Reset, conv_id);
             let _ = self.socket.try_send_to(&reset, s.peer_addr);
         }
-        self._recv_handle.await.ok();
-        self._update_handle.await.ok();
+        if let Some(h) = self._recv_handle.take() {
+            h.await.ok();
+        }
+        if let Some(h) = self._update_handle.take() {
+            h.await.ok();
+        }
     }
 }
 
