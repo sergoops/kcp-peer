@@ -54,6 +54,11 @@ pub struct KcpConfig {
     /// Default is 5, giving ~4.7s total time to exhaustion with the default
     /// [`syn_retry_interval`](KcpConfig::syn_retry_interval).
     pub syn_max_retries: u32,
+    /// Maximum Transmission Unit for KCP segments.
+    ///
+    /// Controls the largest unfragmented segment size KCP will produce.
+    /// Must be at least 50 (KCP minimum). Default is 1400.
+    pub mtu: u16,
 }
 
 impl Default for KcpConfig {
@@ -71,6 +76,7 @@ impl Default for KcpConfig {
             event_channel_capacity: 1024,
             syn_retry_interval: Duration::from_millis(150),
             syn_max_retries: 5,
+            mtu: 1400,
         }
     }
 }
@@ -85,6 +91,7 @@ impl KcpConfig {
         kcp.set_fast_resend(self.fast_resend);
         kcp.set_maximum_resend_times(self.maximum_resend_times);
         kcp.set_interval(self.kcp_interval_ms);
+        kcp.set_mtu(self.mtu as usize).unwrap();
     }
 
     /// Create a builder.
@@ -155,6 +162,11 @@ impl KcpConfigBuilder {
 
     pub fn syn_max_retries(mut self, v: u32) -> Self {
         self.0.syn_max_retries = v;
+        self
+    }
+
+    pub fn mtu(mut self, v: u16) -> Self {
+        self.0.mtu = v;
         self
     }
 
