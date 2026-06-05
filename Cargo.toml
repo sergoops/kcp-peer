@@ -1,0 +1,18 @@
+[package]
+name = "kcp-peer"
+version = "0.1.0"
+edition = "2021"
+description = "Symmetric P2P transport layer around KCP"
+
+[dependencies]
+kcp = { path = "../kcp" }
+tokio = { version = "1", features = ["net", "sync", "time", "rt", "macros", "io-util"] }
+bytes = "1"
+thiserror = "2"
+rand = "0.9"
+tracing = "0.1"
+tokio-util = { version = "0.7", features = ["rt"] }
+atomic-waker = "1.1"
+
+[dev-dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
