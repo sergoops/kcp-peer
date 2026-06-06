@@ -105,10 +105,10 @@ pub type EventReceiver = broadcast::Receiver<Event>;
 ///
 /// For a state-machine diagram see [`SessionState`](crate::session::SessionState).
 ///
-/// # Clone-friendly
+/// # Thread safety
 ///
-/// Internally `Arc`-based. Cloning [`KcpPeer`](KcpPeer) shares the same
-/// socket, session map, and background tasks.
+/// Internally `Arc`-based. [`KcpPeer`] is `Send` + `Sync` and can be
+/// shared across tasks via `Arc<KcpPeer>`.
 ///
 /// # Cancel safety
 ///
@@ -253,9 +253,10 @@ impl KcpPeer {
     ///
     /// # Cancel safety
     ///
-    /// Cancel-safe. If cancelled during handshake initiation, no session entry
-    /// is left in the session map. A SYN may have been sent, but the peer will
-    /// time out the orphaned session — no persistent state leaks.
+    /// Cancel-safe. If cancelled during handshake initiation, a [`SynSent`]
+    /// session entry may remain in the map, but it will be cleaned up by
+    /// the background update task on timeout. A subsequent [`send()`] will
+    /// find the existing session and continue normally.
     /// Safe to use inside `tokio::select!`.
     pub async fn send(&self, peer: SocketAddr, data: &[u8]) -> Result<()> {
         let can = canonicalize(peer);
@@ -386,7 +387,7 @@ impl KcpPeer {
             rmt_wnd: inner.kcp.rmt_wnd(),
             wait_snd: inner.kcp.wait_snd(),
             dead_link: inner.kcp.is_dead_link(),
-            elapsed: Duration::from_millis(s.last_rx.load(Ordering::Acquire)),
+            elapsed: Duration::from_millis(epoch_ms().saturating_sub(s.last_rx.load(Ordering::Acquire))),
         })
     }
 
@@ -468,6 +469,7 @@ pub struct PeerStats {
 }
 
 /// Spawn the receive task: reads UDP packets and dispatches to sessions.
+#[allow(clippy::too_many_arguments)]
 fn spawn_receive_task(
     socket: Arc<UdpSocket>,
     sessions: Arc<std::sync::RwLock<HashMap<CanonicalAddr, Arc<Session>>>>,
@@ -592,6 +594,7 @@ fn spawn_update_task(
 }
 
 /// Route an incoming UDP packet to the correct session or control handler.
+#[allow(clippy::too_many_arguments)]
 async fn handle_incoming(
     data: &[u8],
     from: SocketAddr,
@@ -681,6 +684,7 @@ async fn handle_incoming(
                         if old_conv == conv {
                             if matches!(inner.state, SessionState::Established) {
                                 // SYN_ACK may have been lost — re-acknowledge
+                                session.last_rx.store(epoch_ms(), Ordering::Release);
                                 send_ack_to = Some(from);
                                 ack_conv = conv;
                             }
@@ -765,10 +769,25 @@ async fn handle_incoming(
         }
 
         PacketType::Reset => {
+            if payload.len() < 4 {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "truncated RESET").into());
+            }
+            let mut conv_bytes = [0u8; 4];
+            conv_bytes.copy_from_slice(&payload[..4]);
+            let conv = u32::from_le_bytes(conv_bytes);
+
             let can = canonicalize(from);
-            if let Some(s) = sessions.write().unwrap().remove(&can) {
-                s.mark_closed();
-                let _ = event_tx.send(Event::Disconnected(from));
+            let session = {
+                let map = sessions.read().unwrap();
+                map.get(&can).cloned()
+            };
+            if let Some(s) = session {
+                let conv_match = s.inner.lock().unwrap().conv_id == conv;
+                if conv_match {
+                    sessions.write().unwrap().remove(&can);
+                    s.mark_closed();
+                    let _ = event_tx.send(Event::Disconnected(from));
+                }
             }
         }
     }

@@ -172,11 +172,11 @@ impl Session {
     pub(crate) async fn send_syn(&self) {
         let conv_id = self.inner.lock().unwrap().conv_id;
         let syn = packet::encode_control(PacketType::Syn, conv_id);
-        let now = epoch_ms();
-        self.syn_sent_at.store(now, Ordering::Release);
         if let Err(e) = self.socket.send_to(&syn, self.peer_addr).await {
             tracing::warn!("SYN send failed to {}: {e}", self.peer_addr);
         } else {
+            let now = epoch_ms();
+            self.syn_sent_at.store(now, Ordering::Release);
             tracing::trace!("SYN sent to {}", self.peer_addr);
         }
     }
@@ -313,7 +313,9 @@ impl Session {
         }
 
         let syn = packet::encode_control(PacketType::Syn, conv_id);
-        let _ = self.socket.try_send_to(&syn, self.peer_addr);
+        if let Err(e) = self.socket.try_send_to(&syn, self.peer_addr) {
+            tracing::warn!("SYN retry send to {} failed: {e}", self.peer_addr);
+        }
 
         let now = epoch_ms();
         self.syn_sent_at.store(now, Ordering::Release);
