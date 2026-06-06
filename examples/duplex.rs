@@ -2,6 +2,9 @@ use std::time::Duration;
 
 use kcp_peer::{KcpConfig, KcpPeer};
 
+const ALICE_ADDR: &str = "127.0.0.1:9877";
+const BOB_ADDR: &str = "127.0.0.1:9878";
+
 #[tokio::main]
 async fn main() {
     let config = KcpConfig::builder()
@@ -11,48 +14,47 @@ async fn main() {
         .fast_resend(1)
         .build();
 
-    let server = KcpPeer::bind_with("127.0.0.1:9877", config.clone())
+    let alice = KcpPeer::bind_with(ALICE_ADDR, config.clone())
         .await
-        .expect("bind server");
+        .expect("bind Alice");
+    let bob = KcpPeer::bind_with(BOB_ADDR, config)
+        .await
+        .expect("bind Bob");
 
-    tokio::spawn(async move {
-        loop {
-            match server.recv().await {
-                Ok(msg) => {
-                    let msg_str = String::from_utf8_lossy(&msg.data);
-                    println!("server: received \"{msg_str}\"");
-                    let _ = server.send(msg.peer, &msg.data).await;
-                }
-                Err(_) => break,
+    let bob_addr = bob.local_addr();
+    let alice_addr = alice.local_addr();
+
+    // Both peers initiate to each other at the same time.
+    // The protocol's tie-breaking handshake resolves the collision.
+    let handle_a = tokio::spawn(async move {
+        alice.send(bob_addr, b"ping from Alice").await.unwrap();
+        match tokio::time::timeout(Duration::from_secs(5), alice.recv()).await {
+            Ok(Ok(msg)) => {
+                println!(
+                    "Alice: got {:?} from {}",
+                    std::str::from_utf8(&msg.data).unwrap(),
+                    msg.peer
+                );
             }
+            _ => eprintln!("Alice: recv timeout or error"),
         }
-        println!("server: done");
     });
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    let client = KcpPeer::bind_with("127.0.0.1:0", config)
-        .await
-        .expect("bind client");
-
-    let server_addr = "127.0.0.1:9877".parse().unwrap();
-
-    for msg in &["hello", "world", "from", "client"] {
-        client
-            .send(server_addr, msg.as_bytes())
-            .await
-            .expect("send");
-        println!("client: sent \"{msg}\"");
-    }
-
-    for _ in 0..4 {
-        match tokio::time::timeout(Duration::from_secs(5), client.recv()).await {
+    let handle_b = tokio::spawn(async move {
+        bob.send(alice_addr, b"ping from Bob").await.unwrap();
+        match tokio::time::timeout(Duration::from_secs(5), bob.recv()).await {
             Ok(Ok(msg)) => {
-                println!("client: got \"{}\"", String::from_utf8_lossy(&msg.data));
+                println!(
+                    "Bob: got {:?} from {}",
+                    std::str::from_utf8(&msg.data).unwrap(),
+                    msg.peer
+                );
             }
-            _ => panic!("timeout or channel closed"),
+            _ => eprintln!("Bob: recv timeout or error"),
         }
-    }
+    });
 
+    handle_a.await.unwrap();
+    handle_b.await.unwrap();
     println!("duplex done");
 }

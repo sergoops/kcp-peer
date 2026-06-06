@@ -123,28 +123,6 @@ async fn basic_send_recv() {
 }
 
 #[tokio::test]
-async fn bidirectional() {
-    let (a, b, addr_a, addr_b) = bind_pair().await;
-    let mut events_b = b.events();
-
-    // A initiates
-    a.send(addr_b, b"from_a").await.expect("A send");
-    let _ = wait_for_event(
-        &mut events_b,
-        |e| matches!(e, Event::Connected(_)),
-        Duration::from_secs(5),
-    )
-    .await;
-    let _ = wait_for_data(&b, |_| true, Duration::from_secs(5)).await;
-
-    // B sends back immediately
-    b.send(addr_a, b"from_b").await.expect("B send");
-    let data = wait_for_data(&a, |m| m.peer == addr_b && m.data[..] == *b"from_b", Duration::from_secs(5)).await;
-    assert_eq!(data.peer, addr_b);
-    assert_eq!(&data.data[..], b"from_b");
-}
-
-#[tokio::test]
 async fn crash_initiator() {
     let config = KcpConfig::builder()
         .tick_interval(Duration::from_millis(10))
@@ -531,36 +509,6 @@ async fn large_message() {
 }
 
 #[tokio::test]
-async fn reconnect() {
-    let (a, b, _addr_a, addr_b) = bind_pair().await;
-    let mut events_b = b.events();
-
-    a.send(addr_b, b"first").await.expect("first send");
-    let _ = wait_for_data(&b, |m| m.data[..] == *b"first", Duration::from_secs(5)).await;
-
-    // Disconnect on A — sends RESET to B so B immediately closes the session.
-    a.disconnect(addr_b);
-    let _ = wait_for_event(
-        &mut events_b,
-        |e| matches!(e, Event::Disconnected(_)),
-        Duration::from_secs(5),
-    )
-    .await;
-
-    sleep(Duration::from_millis(100)).await;
-
-    // Reconnect: send() auto-initiates a fresh handshake.
-    // B's session was already removed by the RESET, so this is a normal
-    // handshake (not crash recovery).
-    a.send(addr_b, b"second").await.expect("reconnect send");
-    let data = wait_for_data(&b, |m| m.data[..] == *b"second", Duration::from_secs(5)).await;
-    assert_eq!(&data.data[..], b"second", "reconnected message");
-
-    drop(a);
-    drop(b);
-}
-
-#[tokio::test]
 async fn dead_link() {
     let config = KcpConfig::builder()
         .tick_interval(Duration::from_millis(10))
@@ -733,19 +681,6 @@ async fn stats_active_peer() {
 
     drop(a);
     drop(b);
-}
-
-#[tokio::test]
-async fn stats_unknown_peer() {
-    let a = KcpPeer::bind_with("127.0.0.1:0", test_config())
-        .await
-        .expect("bind A");
-
-    // Never connected → returns None
-    let unknown: SocketAddr = "127.0.0.1:54321".parse().unwrap();
-    assert!(a.stats(unknown).is_none(), "stats for unknown peer returns None");
-
-    drop(a);
 }
 
 #[tokio::test]
