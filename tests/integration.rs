@@ -257,10 +257,6 @@ async fn crash_receiver() {
     drop(b2);
 }
 
-// A receives PeerRestarted when B crashes, restarts on the same address, and
-// B2 initiates a new connection. A detects the restart via SYN from a
-// previously-Established address with a different incarnation.
-
 // Helper: build default test config
 fn test_config() -> KcpConfig {
     KcpConfig::builder()
@@ -272,7 +268,6 @@ fn test_config() -> KcpConfig {
         .build()
 }
 
-// Simplified: verify that A (the initiator) receives Connected after send()
 #[tokio::test]
 async fn initiator_gets_connected_event() {
     let a = KcpPeer::bind_with("127.0.0.1:0", test_config())
@@ -297,6 +292,9 @@ async fn initiator_gets_connected_event() {
     drop(b);
 }
 
+// A receives PeerRestarted when B crashes, restarts on the same address, and
+// B2 initiates a new connection. A detects the restart via SYN from a
+// previously-Established address with a different incarnation.
 #[tokio::test]
 async fn peer_restarted_detection() {
     let a = KcpPeer::bind_with("127.0.0.1:0", test_config())

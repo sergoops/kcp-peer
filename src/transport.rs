@@ -634,7 +634,6 @@ async fn handle_incoming(
                     }
                 }
                 None => {
-                    // Unknown session: send RESET (3 copies for reliability)
                     if payload.len() >= 4 {
                         let mut conv_bytes = [0u8; 4];
                         conv_bytes.copy_from_slice(&payload[..4]);
@@ -705,7 +704,6 @@ async fn handle_incoming(
                                 send_ack_to = Some(from);
                                 ack_conv = old_conv;
                             }
-                            // inner & session locks dropped here
                             let _ = event_tx.send(Event::Connected(from));
                             SynAction::KeepExisting
                         } else {
@@ -716,7 +714,6 @@ async fn handle_incoming(
                     }
                     None => SynAction::CreateNew,
                 };
-                // map read lock dropped here
 
                 SynResult {
                     action,
