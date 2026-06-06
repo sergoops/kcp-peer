@@ -26,7 +26,7 @@ No CI, no rustfmt/clippy config, no rust-toolchain. Tests are `#[tokio::test]`; 
 | `src/packet.rs` | Wire packet types (SYN, SYN_ACK, KCP_DATA, RESET) |
 | `src/error.rs` | `Error` enum |
 | `src/lib.rs` | Public re-exports only |
-| `tests/integration.rs` | All 14 integration tests |
+| `tests/integration.rs` | All 30 integration tests |
 
 ## Gotchas
 

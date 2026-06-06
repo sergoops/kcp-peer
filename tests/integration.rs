@@ -4,6 +4,22 @@ use std::time::Duration;
 use kcp_peer::{DataMessage, Event, KcpConfig, KcpPeer};
 use tokio::time::sleep;
 
+/// Send a raw UDP packet to `target` and read one response.
+/// Returns the response bytes or None on timeout/error.
+fn raw_packet(target: SocketAddr, packet: &[u8]) -> Option<Vec<u8>> {
+    let sock = std::net::UdpSocket::bind("127.0.0.1:0").ok()?;
+    sock.send_to(packet, target).ok()?;
+    sock.set_read_timeout(Some(Duration::from_millis(300))).ok()?;
+    let mut buf = vec![0u8; 1500];
+    match sock.recv_from(&mut buf) {
+        Ok((n, _)) => {
+            buf.truncate(n);
+            Some(buf)
+        }
+        Err(_) => None,
+    }
+}
+
 /// Helper: bind two KcpPeers on loopback, ephemeral ports.
 async fn bind_pair() -> (KcpPeer, KcpPeer, SocketAddr, SocketAddr) {
     let config = KcpConfig::builder()
@@ -915,4 +931,271 @@ async fn send_after_disconnect() {
 
     drop(a);
     drop(b);
+}
+
+#[test]
+fn unknown_session_reset() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let b = KcpPeer::bind_with("127.0.0.1:0", test_config())
+            .await
+            .expect("bind B");
+        let addr_b = b.local_addr();
+
+        // Send a KcpData packet from a raw socket — B has no session for us
+        let conv_id: u32 = 12345;
+        let mut packet = vec![0x00u8]; // KcpData type
+        packet.extend_from_slice(&conv_id.to_le_bytes());
+        packet.extend_from_slice(&[0xAB; 8]); // fake KCP payload
+
+        let resp = raw_packet(addr_b, &packet);
+        let resp = resp.expect("should receive RESET response");
+
+        // Expect RESET: [0x03][conv_id LE]
+        assert_eq!(resp.len(), 5, "RESET is 5 bytes");
+        assert_eq!(resp[0], 0x03, "type byte is Reset");
+        assert_eq!(&resp[1..5], &conv_id.to_le_bytes(), "conv_id matches");
+
+        drop(b);
+    });
+}
+
+#[test]
+fn truncated_syn() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let b = KcpPeer::bind_with("127.0.0.1:0", test_config())
+            .await
+            .expect("bind B");
+        let addr_b = b.local_addr();
+        let mut events_b = b.events();
+
+        // Send a SYN with only 1 byte of payload (needs ≥ 4)
+        let mut packet = vec![0x01u8]; // SYN type
+        packet.push(0x00); // 1 byte payload — truncated
+
+        let _ = raw_packet(addr_b, &packet);
+
+        // No session should be created, no events should fire
+        sleep(Duration::from_millis(200)).await;
+        assert!(b.peers().is_empty(), "no sessions created from truncated SYN");
+        assert!(events_b.try_recv().is_err(), "no events from truncated SYN");
+
+        drop(b);
+    });
+}
+
+#[test]
+fn truncated_syn_ack() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let b = KcpPeer::bind_with("127.0.0.1:0", test_config())
+            .await
+            .expect("bind B");
+        let addr_b = b.local_addr();
+        let mut events_b = b.events();
+
+        // Send a SYN_ACK with only 1 byte of payload (needs ≥ 4)
+        let mut packet = vec![0x02u8]; // SYN_ACK type
+        packet.push(0x00); // 1 byte payload — truncated
+
+        let _ = raw_packet(addr_b, &packet);
+
+        // No session should be created, no events should fire
+        sleep(Duration::from_millis(200)).await;
+        assert!(b.peers().is_empty(), "no sessions created from truncated SYN_ACK");
+        assert!(events_b.try_recv().is_err(), "no events from truncated SYN_ACK");
+
+        drop(b);
+    });
+}
+
+#[test]
+fn syn_ack_unknown_session() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let b = KcpPeer::bind_with("127.0.0.1:0", test_config())
+            .await
+            .expect("bind B");
+        let addr_b = b.local_addr();
+        let mut events_b = b.events();
+
+        // Send a valid SYN_ACK for a session that doesn't exist on B
+        let conv_id: u32 = 99999;
+        let mut packet = vec![0x02u8]; // SYN_ACK type
+        packet.extend_from_slice(&conv_id.to_le_bytes());
+
+        let _ = raw_packet(addr_b, &packet);
+
+        // Should be silently ignored — no session, no events
+        sleep(Duration::from_millis(200)).await;
+        assert!(b.peers().is_empty(), "no sessions created from SYN_ACK to unknown session");
+        assert!(events_b.try_recv().is_err(), "no events from SYN_ACK to unknown session");
+
+        drop(b);
+    });
+}
+
+#[test]
+fn reset_unknown_session() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let b = KcpPeer::bind_with("127.0.0.1:0", test_config())
+            .await
+            .expect("bind B");
+        let addr_b = b.local_addr();
+        let mut events_b = b.events();
+
+        // Send a valid RESET for a session that doesn't exist on B
+        let conv_id: u32 = 77777;
+        let mut packet = vec![0x03u8]; // RESET type
+        packet.extend_from_slice(&conv_id.to_le_bytes());
+
+        let _ = raw_packet(addr_b, &packet);
+
+        // Should be silently ignored — no session, no events
+        sleep(Duration::from_millis(200)).await;
+        assert!(b.peers().is_empty(), "no sessions created from RESET to unknown session");
+        assert!(events_b.try_recv().is_err(), "no events from RESET to unknown session");
+
+        drop(b);
+    });
+}
+
+#[tokio::test]
+async fn recv_cancel_safety() {
+    let (a, b, _addr_a, addr_b) = bind_pair().await;
+    let mut events_b = b.events();
+
+    // Establish session
+    a.send(addr_b, b"ping").await.expect("A send");
+    let _ = wait_for_event(
+        &mut events_b,
+        |e| matches!(e, Event::Connected(_)),
+        Duration::from_secs(5),
+    )
+    .await;
+    let _ = wait_for_data(&b, |_| true, Duration::from_secs(5)).await;
+
+    // Call recv() with a very short timeout — future is cancelled while waiting
+    let _ = tokio::time::timeout(Duration::from_millis(10), b.recv()).await;
+
+    // Now send data — it should be receivable (not lost by the cancelled recv)
+    a.send(addr_b, b"after_cancel").await.expect("A send after cancel");
+
+    let data = tokio::time::timeout(Duration::from_secs(5), b.recv())
+        .await
+        .expect("timeout")
+        .expect("recv error");
+    assert_eq!(&data.data[..], b"after_cancel", "data not lost after cancel");
+
+    drop(a);
+    drop(b);
+}
+
+#[tokio::test]
+async fn send_cancel_during_handshake() {
+    let (a, b, _addr_a, addr_b) = bind_pair().await;
+    let mut events_a = a.events();
+    let mut events_b = b.events();
+
+    // Cancel send() during handshake initiation using tokio::select!
+    // The send will start initiate_session (SYN sent), then be cancelled
+    tokio::select! {
+        _ = a.send(addr_b, b"cancelled") => {}
+        _ = sleep(Duration::from_millis(5)) => {} // cancel after a few ms
+    }
+
+    // B may or may not have received the SYN — either way, the session
+    // on A's side should not permanently block further sends.
+    sleep(Duration::from_millis(100)).await;
+
+    // A new send() should succeed — it creates a fresh session
+    a.send(addr_b, b"after_cancel").await.expect("send after cancel");
+
+    // A gets Connected (new handshake)
+    let _ = wait_for_event(
+        &mut events_a,
+        |e| matches!(e, Event::Connected(_)),
+        Duration::from_secs(5),
+    )
+    .await;
+
+    // B gets Connected + Data
+    let _ = wait_for_event(
+        &mut events_b,
+        |e| matches!(e, Event::Connected(_)),
+        Duration::from_secs(5),
+    )
+    .await;
+    let data = wait_for_data(&b, |m| m.data[..] == *b"after_cancel", Duration::from_secs(5)).await;
+    assert_eq!(&data.data[..], b"after_cancel", "data after cancel handshake");
+
+    drop(a);
+    drop(b);
+}
+
+#[test]
+fn config_mtu_clamp() {
+    // MTU below 50 should be clamped to 50
+    let config = KcpConfig::builder().mtu(30).build();
+    assert_eq!(config.mtu, 50, "mtu=30 clamped to 50");
+
+    let config = KcpConfig::builder().mtu(0).build();
+    assert_eq!(config.mtu, 50, "mtu=0 clamped to 50");
+
+    // MTU >= 50 stays as-is
+    let config = KcpConfig::builder().mtu(1400).build();
+    assert_eq!(config.mtu, 1400, "mtu=1400 unchanged");
+
+    let config = KcpConfig::builder().mtu(50).build();
+    assert_eq!(config.mtu, 50, "mtu=50 unchanged (boundary)");
+}
+
+#[tokio::test]
+async fn custom_syn_retry_config() {
+    let config = KcpConfig::builder()
+        .tick_interval(Duration::from_millis(10))
+        .session_timeout(Duration::from_secs(60))
+        .kcp_nodelay(2, 10, 2, true)
+        .rx_minrto(10)
+        .fast_resend(1)
+        .syn_retry_interval(Duration::from_millis(30))
+        .syn_max_retries(2)
+        .build();
+
+    let a = KcpPeer::bind_with("127.0.0.1:0", config)
+        .await
+        .expect("bind A");
+    let mut events_a = a.events();
+
+    // Send to an unreachable address — SYN retries with exponential backoff
+    let unreachable: SocketAddr = "127.0.0.1:59998".parse().unwrap();
+    let start = tokio::time::Instant::now();
+    let _ = a.send(unreachable, b"hello").await;
+
+    // Wait for Disconnected (retries exhausted)
+    let _ = wait_for_event(
+        &mut events_a,
+        |e| matches!(e, Event::Disconnected(_)),
+        Duration::from_secs(5),
+    )
+    .await;
+    let elapsed = start.elapsed();
+
+    // With syn_retry_interval=30ms, syn_max_retries=2:
+    // retry 0 at ~30ms, retry 1 at ~60ms, then DeadLink
+    // Total should be roughly 90-200ms (including tick_interval overhead)
+    assert!(
+        elapsed.as_millis() < 2000,
+        "SYN retries exhausted quickly ({:?} < 2s)",
+        elapsed
+    );
+    assert!(
+        elapsed.as_millis() >= 50,
+        "SYN retries take some time ({:?} >= 50ms)",
+        elapsed
+    );
+
+    drop(a);
 }
