@@ -1,4 +1,6 @@
+use std::collections::HashSet;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use kcp_peer::{DataMessage, Event, KcpConfig, KcpPeer};
@@ -394,32 +396,105 @@ async fn peer_restarted_detection() {
     drop(b2);
 }
 
+async fn simultaneous_handshake_n(n: usize) {
+    let config = test_config();
+
+    let mut peers: Vec<Arc<KcpPeer>> = Vec::new();
+    let mut addrs = Vec::new();
+    let mut event_rxs = Vec::new();
+
+    for _ in 0..n {
+        let p = Arc::new(
+            KcpPeer::bind_with("127.0.0.1:0", config.clone())
+                .await
+                .expect("bind"),
+        );
+        addrs.push(p.local_addr());
+        event_rxs.push(p.events());
+        peers.push(p);
+    }
+
+    let timeout = match n {
+        2 => Duration::from_secs(5),
+        3 => Duration::from_secs(10),
+        _ => Duration::from_secs(15),
+    };
+
+    let mut handles = Vec::new();
+    for (i, mut rx) in event_rxs.into_iter().enumerate() {
+        let peer = peers[i].clone();
+        let addrs = addrs.clone();
+
+        handles.push(tokio::spawn(async move {
+            // Send unique message to all other peers
+            let msg = vec![i as u8; 32];
+            for (j, &addr) in addrs.iter().enumerate() {
+                if j == i {
+                    continue;
+                }
+                peer.send(addr, &msg).await.expect("send");
+            }
+
+            // Collect N-1 Connected events
+            let mut connected = HashSet::new();
+            while connected.len() < n - 1 {
+                match tokio::time::timeout(timeout, rx.recv()).await {
+                    Ok(Ok(Event::Connected(addr))) => {
+                        connected.insert(addr);
+                    }
+                    Ok(Ok(_)) => continue,
+                    Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(k))) => {
+                        panic!("event channel lagged by {k}");
+                    }
+                    Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+                        panic!("event channel closed");
+                    }
+                    Err(_) => panic!("timeout waiting for Connected events"),
+                }
+            }
+
+            // Collect N-1 data messages
+            let mut received = HashSet::new();
+            while received.len() < n - 1 {
+                match tokio::time::timeout(timeout, peer.recv()).await {
+                    Ok(Ok(msg)) => {
+                        received.insert(msg.data[0]);
+                    }
+                    Ok(Err(e)) => panic!("recv error: {e}"),
+                    Err(_) => panic!("timeout waiting for data"),
+                }
+            }
+
+            // Verify all expected senders
+            for j in 0..n {
+                if i != j {
+                    assert!(
+                        received.contains(&(j as u8)),
+                        "peer {i} did not receive data from peer {j}",
+                    );
+                }
+            }
+        }));
+    }
+
+    for h in handles {
+        h.await.expect("task panicked");
+    }
+}
+
 #[tokio::test]
-async fn simultaneous_handshake() {
-    let (a, b, addr_a, addr_b) = bind_pair().await;
-    let mut events_a = a.events();
-    let mut events_b = b.events();
+async fn simultaneous_handshake_2() {
+    simultaneous_handshake_n(2).await;
+}
 
-    // Both sides initiate at roughly the same time
-    a.send(addr_b, b"from_a").await.expect("A send");
-    b.send(addr_a, b"from_b").await.expect("B send");
+#[tokio::test]
+async fn simultaneous_handshake_3() {
+    simultaneous_handshake_n(3).await;
+}
 
-    // Both should get Connected and Data
-    let _ = wait_for_event(
-        &mut events_a,
-        |e| matches!(e, Event::Connected(_)),
-        Duration::from_secs(5),
-    )
-    .await;
-    let _ = wait_for_event(
-        &mut events_b,
-        |e| matches!(e, Event::Connected(_)),
-        Duration::from_secs(5),
-    )
-    .await;
-
-    let _ = wait_for_data(&a, |_| true, Duration::from_secs(5)).await;
-    let _ = wait_for_data(&b, |_| true, Duration::from_secs(5)).await;
+#[tokio::test]
+async fn simultaneous_handshake_4() {
+    simultaneous_handshake_n(4).await;
 }
 
 #[tokio::test]
