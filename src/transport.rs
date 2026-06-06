@@ -697,6 +697,9 @@ async fn handle_incoming(
                                 inner.conv_id = conv;
                                 inner.state = SessionState::Established;
                                 session.last_rx.store(epoch_ms(), Ordering::Release);
+                                // flush data queued during SynSent handshake
+                                let _ = inner.kcp.update(session::current_ms());
+                                let _ = inner.kcp.flush();
                                 send_ack_to = Some(from);
                                 ack_conv = conv;
                             } else {
