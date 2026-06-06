@@ -1274,3 +1274,157 @@ async fn custom_syn_retry_config() {
 
     drop(a);
 }
+
+#[tokio::test]
+async fn reset_wrong_conv_id() {
+    let config = test_config();
+
+    let a = KcpPeer::bind_with("127.0.0.1:0", config.clone())
+        .await
+        .expect("bind A");
+    let b = KcpPeer::bind_with("127.0.0.1:0", config)
+        .await
+        .expect("bind B");
+    let addr_a = a.local_addr();
+    let addr_b = b.local_addr();
+    let mut events_b = b.events();
+
+    // Establish session
+    a.send(addr_b, b"hello").await.expect("A send");
+    let _ = wait_for_event(
+        &mut events_b,
+        |e| matches!(e, Event::Connected(_)),
+        Duration::from_secs(5),
+    )
+    .await;
+    let _ = wait_for_data(&b, |_| true, Duration::from_secs(5)).await;
+
+    let conv = b.stats(addr_a).expect("stats").conv_id;
+
+    // Drop A so we can send from its address
+    drop(a);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Send RESET with wrong conv_id from A's address — must be ignored
+    let wrong_conv = conv.wrapping_add(1);
+    {
+        let raw = std::net::UdpSocket::bind(addr_a).expect("bind raw on A addr");
+        let reset = kcp_peer::packet::encode_control(kcp_peer::PacketType::Reset, wrong_conv);
+        raw.send_to(&reset, addr_b).ok();
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    assert!(
+        b.stats(addr_a).is_some(),
+        "session not removed by RESET with wrong conv_id"
+    );
+
+    // Send RESET with correct conv_id — session must be removed
+    {
+        let raw = std::net::UdpSocket::bind(addr_a).expect("bind raw on A addr");
+        let reset = kcp_peer::packet::encode_control(kcp_peer::PacketType::Reset, conv);
+        raw.send_to(&reset, addr_b).ok();
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    assert!(
+        b.stats(addr_a).is_none(),
+        "session removed by RESET with correct conv_id"
+    );
+
+    drop(b);
+}
+
+#[tokio::test]
+async fn drop_without_shutdown() {
+    let config = KcpConfig::builder()
+        .tick_interval(Duration::from_millis(10))
+        .session_timeout(Duration::from_millis(300))
+        .kcp_nodelay(2, 10, 2, true)
+        .rx_minrto(10)
+        .fast_resend(1)
+        .build();
+
+    let a = KcpPeer::bind_with("127.0.0.1:0", config.clone())
+        .await
+        .expect("bind A");
+    let b = KcpPeer::bind_with("127.0.0.1:0", config)
+        .await
+        .expect("bind B");
+    let addr_b = b.local_addr();
+    let mut events_b = b.events();
+
+    // Establish session
+    a.send(addr_b, b"ping").await.expect("A send");
+    let _ = wait_for_event(
+        &mut events_b,
+        |e| matches!(e, Event::Connected(_)),
+        Duration::from_secs(5),
+    )
+    .await;
+    let _ = wait_for_data(&b, |_| true, Duration::from_secs(5)).await;
+
+    // Drop A without calling shutdown — no RESET sent
+    drop(a);
+
+    // B detects idle session timeout → Disconnected
+    let _ = wait_for_event(
+        &mut events_b,
+        |e| matches!(e, Event::Disconnected(_)),
+        Duration::from_secs(5),
+    )
+    .await;
+
+    drop(b);
+}
+
+#[tokio::test]
+async fn multiple_event_subscribers() {
+    let config = test_config();
+    let a = KcpPeer::bind_with("127.0.0.1:0", config)
+        .await
+        .expect("bind A");
+    let b = KcpPeer::bind_with("127.0.0.1:0", KcpConfig::builder().tick_interval(Duration::from_millis(10)).session_timeout(Duration::from_secs(60)).build())
+        .await
+        .expect("bind B");
+    let addr_b = b.local_addr();
+
+    let mut ev1 = b.events();
+    let mut ev2 = b.events();
+
+    a.send(addr_b, b"hello").await.expect("A send");
+
+    let _c1 = wait_for_event(&mut ev1, |e| matches!(e, Event::Connected(_)), Duration::from_secs(5)).await;
+    let _c2 = wait_for_event(&mut ev2, |e| matches!(e, Event::Connected(_)), Duration::from_secs(5)).await;
+
+    drop(a);
+    drop(b);
+}
+
+#[tokio::test]
+async fn send_burst_established() {
+    let (a, b, _, addr_b) = bind_pair().await;
+    let mut events_b = b.events();
+
+    a.send(addr_b, b"connect").await.expect("connect send");
+    let _ = wait_for_event(&mut events_b, |e| matches!(e, Event::Connected(_)), Duration::from_secs(5)).await;
+
+    // Consume the initial "connect" data that was piggy-backed on SYN
+    let dm = b.recv().await.expect("b recv connect");
+    assert_eq!(&dm.data[..], b"connect");
+
+    let n = 200;
+    for i in 0..n {
+        let msg = format!("msg-{i}");
+        a.send(addr_b, msg.as_bytes()).await.expect("burst send");
+    }
+
+    for i in 0..n {
+        let expected = format!("msg-{i}");
+        let dm = b.recv().await.expect("b recv burst");
+        assert_eq!(dm.data, expected.as_bytes(), "burst message {i}");
+    }
+
+    drop(a);
+    drop(b);
+}

@@ -822,3 +822,19 @@ impl std::ops::Deref for CanonicalAddr {
         &self.0
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonicalize_ipv4_mapped_ipv6() {
+        let v4: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        let mapped: SocketAddr = "[::ffff:127.0.0.1]:8080".parse().unwrap();
+        let v6: SocketAddr = "[::1]:8080".parse().unwrap();
+
+        assert_eq!(canonicalize(mapped).0, v4, "IPv4-mapped IPv6 → IPv4");
+        assert_eq!(canonicalize(v4).0, v4, "plain IPv4 unchanged");
+        assert_eq!(canonicalize(v6).0, v6, "true IPv6 unchanged");
+    }
+}
