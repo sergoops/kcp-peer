@@ -283,7 +283,11 @@ impl Session {
     /// Retransmit SYN if session is still in SynSent and retry interval has elapsed.
     /// Returns `Ok(true)` if a retry was sent, `Ok(false)` if not yet time.
     /// Returns `Err(Error::DeadLink)` when max retries exhausted.
-    pub fn maybe_retry_syn(&self, config: &crate::config::KcpConfig, now_epoch: u64) -> Result<bool> {
+    pub fn maybe_retry_syn(
+        &self,
+        config: &crate::config::KcpConfig,
+        now_epoch: u64,
+    ) -> Result<bool> {
         if self.closed.load(Ordering::Acquire) {
             return Err(Error::SessionClosed);
         }

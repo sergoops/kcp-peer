@@ -731,8 +731,7 @@ async fn handle_incoming(
             match result.action {
                 SynAction::CreateNew => {
                     let session =
-                        Session::new_inbound(conv, from, socket.clone(), incarnation, config)
-                            .await;
+                        Session::new_inbound(conv, from, socket.clone(), incarnation, config).await;
                     let mut map = sessions.write().unwrap();
                     map.insert(can, session.clone());
                     let _ = event_tx.send(Event::Connected(from));

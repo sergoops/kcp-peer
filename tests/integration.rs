@@ -9,7 +9,8 @@ use tokio::time::sleep;
 fn raw_packet(target: SocketAddr, packet: &[u8]) -> Option<Vec<u8>> {
     let sock = std::net::UdpSocket::bind("127.0.0.1:0").ok()?;
     sock.send_to(packet, target).ok()?;
-    sock.set_read_timeout(Some(Duration::from_millis(300))).ok()?;
+    sock.set_read_timeout(Some(Duration::from_millis(300)))
+        .ok()?;
     let mut buf = vec![0u8; 1500];
     match sock.recv_from(&mut buf) {
         Ok((n, _)) => {
@@ -109,7 +110,12 @@ async fn basic_send_recv() {
     .await;
     assert!(matches!(connected, Event::Connected(_)));
 
-    let data = wait_for_data(&b, |m| m.peer == addr_a && m.data[..] == *b"hello", Duration::from_secs(5)).await;
+    let data = wait_for_data(
+        &b,
+        |m| m.peer == addr_a && m.data[..] == *b"hello",
+        Duration::from_secs(5),
+    )
+    .await;
     assert_eq!(data.peer, addr_a);
     assert_eq!(&data.data[..], b"hello");
 
@@ -117,7 +123,12 @@ async fn basic_send_recv() {
     b.send(addr_a, b"world").await.expect("B→A send");
 
     // A should get Data from B
-    let data2 = wait_for_data(&a, |m| m.peer == addr_b && m.data[..] == *b"world", Duration::from_secs(5)).await;
+    let data2 = wait_for_data(
+        &a,
+        |m| m.peer == addr_b && m.data[..] == *b"world",
+        Duration::from_secs(5),
+    )
+    .await;
     assert_eq!(data2.peer, addr_b);
     assert_eq!(&data2.data[..], b"world");
 }
@@ -194,7 +205,12 @@ async fn crash_initiator() {
     assert!(matches!(connected, Event::Connected(addr) if addr == addr_a));
 
     // 6. Data arrives at B
-    let data = wait_for_data(&b, |m| m.peer == addr_a && m.data[..] == *b"after_crash", Duration::from_secs(5)).await;
+    let data = wait_for_data(
+        &b,
+        |m| m.peer == addr_a && m.data[..] == *b"after_crash",
+        Duration::from_secs(5),
+    )
+    .await;
     assert_eq!(data.peer, addr_a);
     assert_eq!(&data.data[..], b"after_crash");
 
@@ -250,7 +266,12 @@ async fn crash_receiver() {
     .await;
 
     // Data arrives at B2
-    let data = wait_for_data(&b2, |m| m.data[..] == *b"after_crash", Duration::from_secs(5)).await;
+    let data = wait_for_data(
+        &b2,
+        |m| m.data[..] == *b"after_crash",
+        Duration::from_secs(5),
+    )
+    .await;
     assert_eq!(&data.data[..], b"after_crash", "B2 received fresh data");
 
     drop(a);
@@ -360,7 +381,12 @@ async fn peer_restarted_detection() {
     assert!(matches!(connected, Event::Connected(addr) if addr == addr_b));
 
     // 7. Data from B2 arrives at A
-    let data = wait_for_data(&a, |m| m.peer == addr_b && m.data[..] == *b"after_restart", Duration::from_secs(5)).await;
+    let data = wait_for_data(
+        &a,
+        |m| m.peer == addr_b && m.data[..] == *b"after_restart",
+        Duration::from_secs(5),
+    )
+    .await;
     assert_eq!(data.peer, addr_b);
     assert_eq!(&data.data[..], b"after_restart");
 
@@ -703,7 +729,10 @@ async fn stats_after_disconnect() {
     a.disconnect(addr_b);
 
     // Stats returns None after disconnect
-    assert!(a.stats(addr_b).is_none(), "stats after disconnect returns None");
+    assert!(
+        a.stats(addr_b).is_none(),
+        "stats after disconnect returns None"
+    );
 
     drop(a);
     drop(b);
@@ -911,7 +940,10 @@ fn truncated_syn() {
 
         // No session should be created, no events should fire
         sleep(Duration::from_millis(200)).await;
-        assert!(b.peers().is_empty(), "no sessions created from truncated SYN");
+        assert!(
+            b.peers().is_empty(),
+            "no sessions created from truncated SYN"
+        );
         assert!(events_b.try_recv().is_err(), "no events from truncated SYN");
 
         drop(b);
@@ -936,8 +968,14 @@ fn truncated_syn_ack() {
 
         // No session should be created, no events should fire
         sleep(Duration::from_millis(200)).await;
-        assert!(b.peers().is_empty(), "no sessions created from truncated SYN_ACK");
-        assert!(events_b.try_recv().is_err(), "no events from truncated SYN_ACK");
+        assert!(
+            b.peers().is_empty(),
+            "no sessions created from truncated SYN_ACK"
+        );
+        assert!(
+            events_b.try_recv().is_err(),
+            "no events from truncated SYN_ACK"
+        );
 
         drop(b);
     });
@@ -962,8 +1000,14 @@ fn syn_ack_unknown_session() {
 
         // Should be silently ignored — no session, no events
         sleep(Duration::from_millis(200)).await;
-        assert!(b.peers().is_empty(), "no sessions created from SYN_ACK to unknown session");
-        assert!(events_b.try_recv().is_err(), "no events from SYN_ACK to unknown session");
+        assert!(
+            b.peers().is_empty(),
+            "no sessions created from SYN_ACK to unknown session"
+        );
+        assert!(
+            events_b.try_recv().is_err(),
+            "no events from SYN_ACK to unknown session"
+        );
 
         drop(b);
     });
@@ -988,8 +1032,14 @@ fn reset_unknown_session() {
 
         // Should be silently ignored — no session, no events
         sleep(Duration::from_millis(200)).await;
-        assert!(b.peers().is_empty(), "no sessions created from RESET to unknown session");
-        assert!(events_b.try_recv().is_err(), "no events from RESET to unknown session");
+        assert!(
+            b.peers().is_empty(),
+            "no sessions created from RESET to unknown session"
+        );
+        assert!(
+            events_b.try_recv().is_err(),
+            "no events from RESET to unknown session"
+        );
 
         drop(b);
     });
@@ -1014,13 +1064,19 @@ async fn recv_cancel_safety() {
     let _ = tokio::time::timeout(Duration::from_millis(10), b.recv()).await;
 
     // Now send data — it should be receivable (not lost by the cancelled recv)
-    a.send(addr_b, b"after_cancel").await.expect("A send after cancel");
+    a.send(addr_b, b"after_cancel")
+        .await
+        .expect("A send after cancel");
 
     let data = tokio::time::timeout(Duration::from_secs(5), b.recv())
         .await
         .expect("timeout")
         .expect("recv error");
-    assert_eq!(&data.data[..], b"after_cancel", "data not lost after cancel");
+    assert_eq!(
+        &data.data[..],
+        b"after_cancel",
+        "data not lost after cancel"
+    );
 
     drop(a);
     drop(b);
@@ -1044,7 +1100,9 @@ async fn send_cancel_during_handshake() {
     sleep(Duration::from_millis(100)).await;
 
     // A new send() should succeed — it creates a fresh session
-    a.send(addr_b, b"after_cancel").await.expect("send after cancel");
+    a.send(addr_b, b"after_cancel")
+        .await
+        .expect("send after cancel");
 
     // A gets Connected (new handshake)
     let _ = wait_for_event(
@@ -1061,8 +1119,17 @@ async fn send_cancel_during_handshake() {
         Duration::from_secs(5),
     )
     .await;
-    let data = wait_for_data(&b, |m| m.data[..] == *b"after_cancel", Duration::from_secs(5)).await;
-    assert_eq!(&data.data[..], b"after_cancel", "data after cancel handshake");
+    let data = wait_for_data(
+        &b,
+        |m| m.data[..] == *b"after_cancel",
+        Duration::from_secs(5),
+    )
+    .await;
+    assert_eq!(
+        &data.data[..],
+        b"after_cancel",
+        "data after cancel handshake"
+    );
 
     drop(a);
     drop(b);

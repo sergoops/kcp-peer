@@ -41,16 +41,18 @@ async fn main() {
 
     // ── Helper: run one client incarnation ──
     async fn run_client(label: &str, addr: &str, payload: &[u8], config: KcpConfig) {
-        let client = KcpPeer::bind_with(addr, config)
-            .await
-            .expect("bind client");
+        let client = KcpPeer::bind_with(addr, config).await.expect("bind client");
 
         let server_addr = SERVER_ADDR.parse().unwrap();
         client.send(server_addr, payload).await.expect("send");
 
         match tokio::time::timeout(Duration::from_secs(5), client.recv()).await {
             Ok(Ok(msg)) => {
-                println!("{label}: Data({}, {:?})", msg.peer, std::str::from_utf8(&msg.data));
+                println!(
+                    "{label}: Data({}, {:?})",
+                    msg.peer,
+                    std::str::from_utf8(&msg.data)
+                );
                 assert_eq!(&msg.data[..], payload);
                 println!("{label}: echo OK");
             }
@@ -67,5 +69,11 @@ async fn main() {
     sleep(Duration::from_millis(100)).await;
 
     // ── Client v2 (restart on same port) ──
-    run_client("client[v2]", CLIENT_ADDR, b"hello v2 (after restart)", config).await;
+    run_client(
+        "client[v2]",
+        CLIENT_ADDR,
+        b"hello v2 (after restart)",
+        config,
+    )
+    .await;
 }
