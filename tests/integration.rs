@@ -660,3 +660,259 @@ async fn concurrent_send_to_unknown_peer() {
     drop(a);
     drop(b);
 }
+
+#[tokio::test]
+async fn shutdown_lifecycle() {
+    let (a, b, _addr_a, addr_b) = bind_pair().await;
+    let mut events_b = b.events();
+
+    // Establish session: A → B
+    a.send(addr_b, b"ping").await.expect("A send");
+    let _ = wait_for_event(
+        &mut events_b,
+        |e| matches!(e, Event::Connected(_)),
+        Duration::from_secs(5),
+    )
+    .await;
+    let _ = wait_for_data(&b, |_| true, Duration::from_secs(5)).await;
+
+    // Shutdown A — sends RESET to all peers
+    a.shutdown().await;
+
+    // B should receive Disconnected (RESET was sent)
+    let _ = wait_for_event(
+        &mut events_b,
+        |e| matches!(e, Event::Disconnected(_)),
+        Duration::from_secs(5),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn stats_active_peer() {
+    let (a, b, addr_a, addr_b) = bind_pair().await;
+    let mut events_b = b.events();
+
+    // Establish session
+    a.send(addr_b, b"ping").await.expect("A send");
+    let _ = wait_for_event(
+        &mut events_b,
+        |e| matches!(e, Event::Connected(_)),
+        Duration::from_secs(5),
+    )
+    .await;
+    let _ = wait_for_data(&b, |_| true, Duration::from_secs(5)).await;
+
+    // Check stats on B's side for A
+    let stats = b.stats(addr_a).expect("stats should return Some");
+    assert!(stats.conv_id != 0, "conv_id should be non-zero");
+    assert_eq!(stats.send_wnd, 128, "send_wnd matches config");
+    assert_eq!(stats.recv_wnd, 128, "recv_wnd matches config");
+    assert!(!stats.dead_link, "dead_link should be false");
+
+    // Check stats on A's side for B
+    let stats_a = a.stats(addr_b).expect("stats should return Some");
+    assert!(stats_a.conv_id != 0, "conv_id should be non-zero");
+    assert!(!stats_a.dead_link, "dead_link should be false");
+
+    drop(a);
+    drop(b);
+}
+
+#[tokio::test]
+async fn stats_unknown_peer() {
+    let a = KcpPeer::bind_with("127.0.0.1:0", test_config())
+        .await
+        .expect("bind A");
+
+    // Never connected → returns None
+    let unknown: SocketAddr = "127.0.0.1:54321".parse().unwrap();
+    assert!(a.stats(unknown).is_none(), "stats for unknown peer returns None");
+
+    drop(a);
+}
+
+#[tokio::test]
+async fn stats_after_disconnect() {
+    let (a, b, _addr_a, addr_b) = bind_pair().await;
+    let mut events_b = b.events();
+
+    // Establish session
+    a.send(addr_b, b"ping").await.expect("A send");
+    let _ = wait_for_event(
+        &mut events_b,
+        |e| matches!(e, Event::Connected(_)),
+        Duration::from_secs(5),
+    )
+    .await;
+    let _ = wait_for_data(&b, |_| true, Duration::from_secs(5)).await;
+
+    // Stats works before disconnect
+    assert!(a.stats(addr_b).is_some(), "stats before disconnect");
+
+    // Disconnect B from A
+    a.disconnect(addr_b);
+
+    // Stats returns None after disconnect
+    assert!(a.stats(addr_b).is_none(), "stats after disconnect returns None");
+
+    drop(a);
+    drop(b);
+}
+
+#[tokio::test]
+async fn peers_list() {
+    let config = KcpConfig::builder()
+        .tick_interval(Duration::from_millis(10))
+        .session_timeout(Duration::from_secs(60))
+        .kcp_nodelay(2, 10, 2, true)
+        .rx_minrto(10)
+        .fast_resend(1)
+        .build();
+
+    let a = KcpPeer::bind_with("127.0.0.1:0", config.clone())
+        .await
+        .expect("bind A");
+    let b = KcpPeer::bind_with("127.0.0.1:0", config.clone())
+        .await
+        .expect("bind B");
+    let c = KcpPeer::bind_with("127.0.0.1:0", config)
+        .await
+        .expect("bind C");
+
+    let addr_b = b.local_addr();
+    let addr_c = c.local_addr();
+
+    let mut events_b = b.events();
+    let mut events_c = c.events();
+
+    // Initially empty
+    assert!(a.peers().is_empty(), "no peers before connecting");
+
+    // A → B
+    a.send(addr_b, b"hi_b").await.expect("A→B");
+    let _ = wait_for_event(
+        &mut events_b,
+        |e| matches!(e, Event::Connected(_)),
+        Duration::from_secs(5),
+    )
+    .await;
+    let _ = wait_for_data(&b, |_| true, Duration::from_secs(5)).await;
+
+    let peers = a.peers();
+    assert_eq!(peers.len(), 1, "one peer after A→B");
+    assert!(peers.contains(&addr_b), "peers contains B");
+
+    // A → C
+    a.send(addr_c, b"hi_c").await.expect("A→C");
+    let _ = wait_for_event(
+        &mut events_c,
+        |e| matches!(e, Event::Connected(_)),
+        Duration::from_secs(5),
+    )
+    .await;
+    let _ = wait_for_data(&c, |_| true, Duration::from_secs(5)).await;
+
+    let peers = a.peers();
+    assert_eq!(peers.len(), 2, "two peers after A→C");
+    assert!(peers.contains(&addr_b), "peers contains B");
+    assert!(peers.contains(&addr_c), "peers contains C");
+
+    // Disconnect B
+    a.disconnect(addr_b);
+
+    let peers = a.peers();
+    assert_eq!(peers.len(), 1, "one peer after disconnect B");
+    assert!(peers.contains(&addr_c), "peers contains only C");
+
+    drop(a);
+    drop(b);
+    drop(c);
+}
+
+#[tokio::test]
+async fn syn_retry_exhaustion() {
+    let config = KcpConfig::builder()
+        .tick_interval(Duration::from_millis(10))
+        .session_timeout(Duration::from_secs(60))
+        .kcp_nodelay(2, 10, 2, true)
+        .rx_minrto(10)
+        .fast_resend(1)
+        .syn_retry_interval(Duration::from_millis(50))
+        .syn_max_retries(1)
+        .build();
+
+    let a = KcpPeer::bind_with("127.0.0.1:0", config)
+        .await
+        .expect("bind A");
+    let mut events_a = a.events();
+
+    // Send to an address that will never respond — SYN retry then exhaustion
+    let unreachable: SocketAddr = "127.0.0.1:59999".parse().unwrap();
+    let _ = a.send(unreachable, b"hello").await;
+
+    // Should get Connected (handshake initiated) then Disconnected (retries exhausted)
+    // The update task detects dead_link after syn_max_retries and prunes the session
+    let _ = wait_for_event(
+        &mut events_a,
+        |e| matches!(e, Event::Disconnected(_)),
+        Duration::from_secs(5),
+    )
+    .await;
+
+    drop(a);
+}
+
+#[tokio::test]
+async fn send_after_disconnect() {
+    let (a, b, _addr_a, addr_b) = bind_pair().await;
+    let mut events_a = a.events();
+    let mut events_b = b.events();
+
+    // Establish session and exchange data
+    a.send(addr_b, b"first").await.expect("A→B first");
+    let _ = wait_for_event(
+        &mut events_b,
+        |e| matches!(e, Event::Connected(_)),
+        Duration::from_secs(5),
+    )
+    .await;
+    let _ = wait_for_data(&b, |_| true, Duration::from_secs(5)).await;
+
+    // A disconnects from B
+    a.disconnect(addr_b);
+
+    // B sees Disconnected
+    let _ = wait_for_event(
+        &mut events_b,
+        |e| matches!(e, Event::Disconnected(_)),
+        Duration::from_secs(5),
+    )
+    .await;
+
+    sleep(Duration::from_millis(100)).await;
+
+    // A reconnects — send() auto-initiates new handshake
+    a.send(addr_b, b"second").await.expect("reconnect send");
+
+    // A gets Connected for the new session
+    let _ = wait_for_event(
+        &mut events_a,
+        |e| matches!(e, Event::Connected(_)),
+        Duration::from_secs(5),
+    )
+    .await;
+
+    // B gets Connected + Data from the reconnection
+    let _ = wait_for_event(
+        &mut events_b,
+        |e| matches!(e, Event::Connected(_)),
+        Duration::from_secs(5),
+    )
+    .await;
+    let data = wait_for_data(&b, |m| m.data[..] == *b"second", Duration::from_secs(5)).await;
+    assert_eq!(&data.data[..], b"second", "reconnected data received");
+
+    drop(a);
+    drop(b);
+}
