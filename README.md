@@ -301,7 +301,7 @@ No special combinator usage is required on your side — `tokio::select!`,
 | `rx_minrto` | 10 | Minimum RTO (ms) |
 | `fast_resend` | 1 | Fast retransmission threshold |
 | `maximum_resend_times` | 20 | Max retransmits before dead link |
-| `tick_interval` | 10ms | How often the bg update task runs |
+| `tick_interval` | 20ms | How often the bg update task runs |
 | `session_timeout` | 60s | Close idle sessions after this duration |
 | `event_channel_capacity` | 1024 | Broadcast channel capacity for lifecycle events |
 | `syn_retry_interval` | 150ms | Base interval for SYN retry exponential backoff |

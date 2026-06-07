@@ -71,7 +71,7 @@ impl Default for KcpConfig {
             rx_minrto: 10,
             fast_resend: 1,
             maximum_resend_times: 20,
-            tick_interval: Duration::from_millis(10),
+            tick_interval: Duration::from_millis(20),
             session_timeout: Duration::from_secs(60),
             event_channel_capacity: 1024,
             syn_retry_interval: Duration::from_millis(150),
