@@ -107,7 +107,12 @@ async fn send_burst_established() {
     let mut events_b = b.events();
 
     a.send(addr_b, b"connect").await.expect("connect send");
-    let _ = wait_for_event(&mut events_b, |e| matches!(e, Event::Connected(_)), Duration::from_secs(5)).await;
+    let _ = wait_for_event(
+        &mut events_b,
+        |e| matches!(e, Event::Connected(_)),
+        Duration::from_secs(5),
+    )
+    .await;
 
     let dm = b.recv().await.expect("b recv connect");
     assert_eq!(&dm.data[..], b"connect");

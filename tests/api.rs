@@ -42,9 +42,15 @@ async fn multiple_event_subscribers() {
     let a = KcpPeer::bind_with("127.0.0.1:0", config)
         .await
         .expect("bind A");
-    let b = KcpPeer::bind_with("127.0.0.1:0", KcpConfig::builder().tick_interval(Duration::from_millis(10)).session_timeout(Duration::from_secs(60)).build())
-        .await
-        .expect("bind B");
+    let b = KcpPeer::bind_with(
+        "127.0.0.1:0",
+        KcpConfig::builder()
+            .tick_interval(Duration::from_millis(10))
+            .session_timeout(Duration::from_secs(60))
+            .build(),
+    )
+    .await
+    .expect("bind B");
     let addr_b = b.local_addr();
 
     let mut ev1 = b.events();
@@ -52,8 +58,18 @@ async fn multiple_event_subscribers() {
 
     a.send(addr_b, b"hello").await.expect("A send");
 
-    let _c1 = wait_for_event(&mut ev1, |e| matches!(e, Event::Connected(_)), Duration::from_secs(5)).await;
-    let _c2 = wait_for_event(&mut ev2, |e| matches!(e, Event::Connected(_)), Duration::from_secs(5)).await;
+    let _c1 = wait_for_event(
+        &mut ev1,
+        |e| matches!(e, Event::Connected(_)),
+        Duration::from_secs(5),
+    )
+    .await;
+    let _c2 = wait_for_event(
+        &mut ev2,
+        |e| matches!(e, Event::Connected(_)),
+        Duration::from_secs(5),
+    )
+    .await;
 
     drop(a);
     drop(b);

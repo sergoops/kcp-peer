@@ -387,7 +387,9 @@ impl KcpPeer {
             rmt_wnd: inner.kcp.rmt_wnd(),
             wait_snd: inner.kcp.wait_snd(),
             dead_link: inner.kcp.is_dead_link(),
-            elapsed: Duration::from_millis(epoch_ms().saturating_sub(s.last_rx.load(Ordering::Acquire))),
+            elapsed: Duration::from_millis(
+                epoch_ms().saturating_sub(s.last_rx.load(Ordering::Acquire)),
+            ),
         })
     }
 
