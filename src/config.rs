@@ -64,14 +64,14 @@ pub struct KcpConfig {
 impl Default for KcpConfig {
     fn default() -> Self {
         Self {
-            kcp_interval_ms: 20,
+            kcp_interval_ms: 100,
             kcp_nodelay: (1, 20, 2, true),
             snd_wnd: 128,
             rcv_wnd: 128,
             rx_minrto: 10,
             fast_resend: 1,
             maximum_resend_times: 20,
-            tick_interval: Duration::from_millis(20),
+            tick_interval: Duration::from_millis(100),
             session_timeout: Duration::from_secs(60),
             event_channel_capacity: 1024,
             syn_retry_interval: Duration::from_millis(150),

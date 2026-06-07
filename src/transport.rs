@@ -538,6 +538,11 @@ fn spawn_update_task(
                 _ = tick.tick() => {}
             }
 
+            // Fast path: no sessions → skip per-session work
+            if sessions.read().unwrap().is_empty() {
+                continue;
+            }
+
             let now_ms = session::current_ms();
             let now_epoch = epoch_ms();
             let mut to_remove: Vec<CanonicalAddr> = Vec::new();
