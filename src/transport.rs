@@ -535,60 +535,61 @@ fn spawn_update_task(
 
                 _ = shutdown.cancelled() => break,
 
-                _ = tick.tick() => {
-                    let now_ms = session::current_ms();
-                    let now_epoch = epoch_ms();
-                    let mut to_remove: Vec<CanonicalAddr> = Vec::new();
+                _ = tick.tick() => {}
+            }
 
-                    {
-                        let map = sessions.read().unwrap();
-                        for (can, sess) in map.iter() {
-                            if sess.closed.load(Ordering::Acquire) {
-                                continue;
-                            }
+            let now_ms = session::current_ms();
+            let now_epoch = epoch_ms();
+            let mut to_remove: Vec<CanonicalAddr> = Vec::new();
 
-                            match sess.update(now_ms) {
-                                Err(crate::error::Error::DeadLink) => {
-                                    to_remove.push(*can);
-                                    continue;
-                                }
-                                Err(e) => {
-                                    tracing::debug!("update error for {}: {e}", sess.peer_addr);
-                                }
-                                Ok(_) => {}
-                            }
-
-                            match sess.maybe_retry_syn(&config, now_epoch) {
-                                Err(crate::error::Error::DeadLink) => {
-                                    to_remove.push(*can);
-                                    continue;
-                                }
-                                Err(_) => {}
-                                Ok(_) => {}
-                            }
-
-                            let last_rx_ms = sess.last_rx.load(Ordering::Acquire);
-                            if last_rx_ms > 0 {
-                                let age = Duration::from_millis(now_epoch.saturating_sub(last_rx_ms));
-                                if age > config.session_timeout {
-                                    to_remove.push(*can);
-                                }
-                            }
-                        }
+            {
+                let map = sessions.read().unwrap();
+                for (can, sess) in map.iter() {
+                    if sess.closed.load(Ordering::Acquire) {
+                        continue;
                     }
 
-                    for can in to_remove {
-                        if let Some(sess) = sessions.write().unwrap().remove(&can) {
-                            // Send RESET to notify peer the session is gone
-                            let conv_id = sess.inner.lock().unwrap().conv_id;
-                            let reset = packet::encode_control(PacketType::Reset, conv_id);
-                            for _ in 0..3 {
-                                let _ = socket.try_send_to(&reset, sess.peer_addr);
-                            }
-                            sess.mark_closed();
-                            let _ = event_tx.send(Event::Disconnected(sess.peer_addr));
+                    match sess.update(now_ms) {
+                        Err(crate::error::Error::DeadLink) => {
+                            to_remove.push(*can);
+                            continue;
+                        }
+                        Err(e) => {
+                            tracing::debug!("update error for {}: {e}", sess.peer_addr);
+                        }
+                        Ok(_) => {}
+                    }
+
+                    match sess.maybe_retry_syn(&config, now_epoch) {
+                        Err(crate::error::Error::DeadLink) => {
+                            to_remove.push(*can);
+                            continue;
+                        }
+                        Err(_) => {}
+                        Ok(_) => {}
+                    }
+
+                    let last_rx_ms = sess.last_rx.load(Ordering::Acquire);
+                    if last_rx_ms > 0 {
+                        let age =
+                            Duration::from_millis(now_epoch.saturating_sub(last_rx_ms));
+                        if age > config.session_timeout {
+                            to_remove.push(*can);
                         }
                     }
+                }
+            }
+
+            for can in to_remove {
+                if let Some(sess) = sessions.write().unwrap().remove(&can) {
+                    // Send RESET to notify peer the session is gone
+                    let conv_id = sess.inner.lock().unwrap().conv_id;
+                    let reset = packet::encode_control(PacketType::Reset, conv_id);
+                    for _ in 0..3 {
+                        let _ = socket.try_send_to(&reset, sess.peer_addr);
+                    }
+                    sess.mark_closed();
+                    let _ = event_tx.send(Event::Disconnected(sess.peer_addr));
                 }
             }
         }
