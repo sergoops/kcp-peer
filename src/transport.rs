@@ -9,6 +9,7 @@ use bytes::Bytes;
 use rand::Rng;
 use tokio::net::UdpSocket;
 use tokio::sync::broadcast;
+use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::KcpConfig;
@@ -526,6 +527,7 @@ fn spawn_update_task(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(config.tick_interval);
+        tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
         loop {
             tokio::select! {
