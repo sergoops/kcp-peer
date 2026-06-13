@@ -6,10 +6,18 @@ description = "Symmetric P2P transport layer around KCP"
 
 [dependencies]
 kcp = { path = "../kcp" }
-tokio = { version = "1", features = ["net", "sync", "time", "rt", "rt-multi-thread", "macros", "io-util"] }
+tokio = { version = "1", features = [
+    "net",
+    "sync",
+    "time",
+    "rt",
+    "rt-multi-thread",
+    "macros",
+    "io-util",
+] }
 bytes = "1"
 thiserror = "2"
-rand = "0.9"
+rand = "0.10"
 tracing = "0.1"
 tokio-util = { version = "0.7", features = ["rt"] }
 

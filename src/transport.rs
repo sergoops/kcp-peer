@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use rand::Rng;
+use rand::RngExt;
 use tokio::net::UdpSocket;
 use tokio::sync::broadcast;
 use tokio::time::MissedTickBehavior;
@@ -576,8 +576,7 @@ fn spawn_update_task(
 
                     let last_rx_ms = sess.last_rx.load(Ordering::Acquire);
                     if last_rx_ms > 0 {
-                        let age =
-                            Duration::from_millis(now_epoch.saturating_sub(last_rx_ms));
+                        let age = Duration::from_millis(now_epoch.saturating_sub(last_rx_ms));
                         if age > config.session_timeout {
                             to_remove.push(*can);
                         }
